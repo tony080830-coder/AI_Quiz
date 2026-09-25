@@ -27,10 +27,17 @@ if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
 if 'explanation' not in st.session_state: st.session_state.explanation = ""
 
-def load_next_question():
-    c.execute("SELECT * FROM questions ORDER BY wrong_count DESC")
+def load_next_question(target_category=None):
+    if target_category and target_category != "全部題目":
+        c.execute("SELECT * FROM questions WHERE category=? ORDER BY wrong_count DESC", (target_category,))
+    else:
+        c.execute("SELECT * FROM questions ORDER BY wrong_count DESC")
+    
     all_q = c.fetchall()
-    if not all_q: return None
+    if not all_q: 
+        st.session_state.current_q = None
+        return
+        
     # 優先從錯最多次的前一半題目中隨機抽取
     pool_size = max(1, len(all_q) // 2)
     st.session_state.current_q = random.choice(all_q[:pool_size])
@@ -55,54 +62,64 @@ tab_quiz, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📥 匯入�
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
-    c.execute("SELECT COUNT(*) FROM questions")
-    total_q = c.fetchone()[0]
+    c.execute("SELECT DISTINCT category FROM questions")
+    categories = [row[0] for row in c.fetchall()]
     
-    if total_q == 0:
+    if not categories:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
     else:
-        if st.session_state.current_q is None: load_next_question()
+        # 新增下拉式選單
+        selected_pdf = st.selectbox("📁 選擇要練習的題庫：", ["全部題目"] + categories)
         
-        q = st.session_state.current_q
-        st.caption(f"分類：{q[1]} | 歷史錯誤次數：{q[8]}")
-        st.subheader(q[2])
-        
-        options = [q[3], q[4], q[5], q[6]]
-        correct_ans = q[7]
-        q_id = q[0]
-        
-        if not st.session_state.answered:
-            for opt in options:
-                if st.button(opt, use_container_width=True):
-                    check_answer(opt, correct_ans, q_id)
-                    st.rerun()
-        else:
-            if st.session_state.is_correct:
-                st.success("✅ 答對了！")
-            else:
-                st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
+        # 當切換題庫時，強制重新抽題
+        if 'last_selected' not in st.session_state or st.session_state.last_selected != selected_pdf:
+            st.session_state.last_selected = selected_pdf
+            load_next_question(selected_pdf)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("👉 下一題", use_container_width=True, type="primary"):
-                    load_next_question()
-                    st.rerun()
-            with col2:
-                if not st.session_state.is_correct and st.button("🧠 呼叫 AI 老師", use_container_width=True):
-                    api_key = get_api_key()
-                    if not api_key: st.error("請先到設定頁面輸入 API Key！")
-                    else:
-                        with st.spinner("AI 正在思考中..."):
-                            try:
-                                genai.configure(api_key=api_key)
-                                model = genai.GenerativeModel('gemini-3.8-flash')
-                                prompt = f"題目：{q[2]}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
-                                response = model.generate_content(prompt)
-                                st.session_state.explanation = response.text
-                            except Exception as e:
-                                st.error(f"呼叫 AI 失敗：{e}")
-            if st.session_state.explanation:
-                st.info(st.session_state.explanation)
+        if st.session_state.current_q is None: 
+            load_next_question(selected_pdf)
+            
+        q = st.session_state.current_q
+        if q:
+            st.caption(f"來源：{q[1]} | 歷史錯誤次數：{q[8]}")
+            st.subheader(q[2])
+            
+            options = [q[3], q[4], q[5], q[6]]
+            correct_ans = q[7]
+            q_id = q[0]
+            
+            if not st.session_state.answered:
+                for opt in options:
+                    if st.button(opt, use_container_width=True):
+                        check_answer(opt, correct_ans, q_id)
+                        st.rerun()
+            else:
+                if st.session_state.is_correct:
+                    st.success("✅ 答對了！")
+                else:
+                    st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("👉 下一題", use_container_width=True, type="primary"):
+                        load_next_question(selected_pdf)
+                        st.rerun()
+                with col2:
+                    if not st.session_state.is_correct and st.button("🧠 呼叫 AI 老師", use_container_width=True):
+                        api_key = get_api_key()
+                        if not api_key: st.error("請先到設定頁面輸入 API Key！")
+                        else:
+                            with st.spinner("AI 正在思考中..."):
+                                try:
+                                    genai.configure(api_key=api_key)
+                                    model = genai.GenerativeModel('gemini-3.8-flash')
+                                    prompt = f"題目：{q[2]}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
+                                    response = model.generate_content(prompt)
+                                    st.session_state.explanation = response.text
+                                except Exception as e:
+                                    st.error(f"呼叫 AI 失敗：{e}")
+                if st.session_state.explanation:
+                    st.info(st.session_state.explanation)
 
 # ---------- 【匯入區】 ----------
 with tab_import:
@@ -124,9 +141,10 @@ with tab_import:
                     raw_text = response.text.replace('```json', '').replace('```', '').strip()
                     new_questions = json.loads(raw_text)
                     
+                    pdf_name = uploaded_pdf.name # 抓取上傳的 PDF 檔名
                     for nq in new_questions:
                         c.execute("INSERT INTO questions (category, text, opt1, opt2, opt3, opt4, answer) VALUES (?,?,?,?,?,?,?)",
-                                  (nq['category'], nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer']))
+                                  (pdf_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer']))
                     conn.commit()
                     st.success(f"✅ 成功萃取 {len(new_questions)} 題並存入資料庫！")
                     st.session_state.current_q = None
