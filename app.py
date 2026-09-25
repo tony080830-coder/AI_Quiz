@@ -131,8 +131,8 @@ with tab_import:
                     st.success(f"✅ 成功萃取 {len(new_questions)} 題並存入資料庫！")
                     st.session_state.current_q = None
                 except Exception as e:
-                    st.error("解析失敗，請確認 PDF 內容是否為圖片或 API Key 錯誤。")
-
+                    st.error(f"解析失敗，詳細錯誤：{e}")
+                  
 # ---------- 【設定與統計區】 ----------
 with tab_settings:
     st.subheader("🔑 API 設定")
