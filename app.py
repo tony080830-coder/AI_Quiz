@@ -74,7 +74,8 @@ def check_answer(selected, correct, q_id):
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
-tab_quiz, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📥 匯入題庫", "⚙️ 設定與統計"])
+# 新增「📖 錯題總覽」分頁
+tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與統計"])
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
@@ -86,7 +87,7 @@ with tab_quiz:
     else:
         col_f, col_p = st.columns(2)
         with col_f:
-            selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders)
+            selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders, key="quiz_folder")
         
         with col_p:
             if selected_folder == "全部資料夾":
@@ -94,7 +95,7 @@ with tab_quiz:
             else:
                 c.execute("SELECT DISTINCT category FROM questions WHERE folder=?", (selected_folder,))
             pdfs = [row['category'] for row in c.fetchall() if row['category']]
-            selected_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + pdfs)
+            selected_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + pdfs, key="quiz_pdf")
         
         state_key = f"{selected_folder}_{selected_pdf}"
         if 'last_selected' not in st.session_state or st.session_state.last_selected != state_key:
@@ -157,6 +158,59 @@ with tab_quiz:
                 if st.session_state.explanation:
                     st.info(st.session_state.explanation)
 
+# ---------- 【錯題總覽區】 ----------
+with tab_review:
+    st.markdown("### 📖 各 PDF 完整題目與答案總覽")
+    
+    c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+    folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    
+    if not folders:
+        st.info("目前沒有任何題庫資料，請先至「匯入題庫」上傳。")
+    else:
+        col_f, col_p = st.columns(2)
+        with col_f:
+            rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders, key="rev_folder")
+        with col_p:
+            if rev_folder == "全部資料夾":
+                c.execute("SELECT DISTINCT category FROM questions")
+            else:
+                c.execute("SELECT DISTINCT category FROM questions WHERE folder=?", (rev_folder,))
+            rev_pdfs = [row['category'] for row in c.fetchall() if row['category']]
+            rev_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + rev_pdfs, key="rev_pdf")
+            
+        # 根據選擇條件撈出題目
+        query = "SELECT * FROM questions WHERE 1=1"
+        params = []
+        if rev_folder != "全部資料夾":
+            query += " AND folder=?"
+            params.append(rev_folder)
+        if rev_pdf != "全部考卷":
+            query += " AND category=?"
+            params.append(rev_pdf)
+            
+        c.execute(query, params)
+        questions_to_show = c.fetchall()
+        
+        if not questions_to_show:
+            st.warning("此分類下沒有找到任何題目。")
+        else:
+            st.write(f"共找到 **{len(questions_to_show)}** 題：")
+            st.divider()
+            
+            for idx, q in enumerate(questions_to_show):
+                with st.expander(f"題目 {idx+1}: {q['text'][:35]}... (錯誤次數: {q['wrong_count']})"):
+                    st.markdown(f"**【題目】** {q['text']}")
+                    st.markdown(f"- (A) {q['opt1']}")
+                    st.markdown(f"- (B) {q['opt2']}")
+                    st.markdown(f"- (C) {q['opt3']}")
+                    st.markdown(f"- (D) {q['opt4']}")
+                    st.markdown(f"✅ **正確答案**：`{q['answer']}`")
+                    
+                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解"
+                    st.markdown(f"💡 **解析**：{exp_text}")
+                    st.markdown(f"📉 **歷史錯誤次數**：`{q['wrong_count']}` 次")
+
 # ---------- 【匯入區】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧 PDF 匯入")
@@ -172,7 +226,6 @@ with tab_import:
         
     uploaded_pdf = st.file_uploader("上傳考卷 PDF，AI 會自動切分並寫詳解！", type="pdf")
     
-    # 允許自訂義匯入後的 PDF 顯示名稱
     default_pdf_name = uploaded_pdf.name if uploaded_pdf else ""
     custom_pdf_name = st.text_input("📄 編輯匯入後的 PDF 名稱：", value=default_pdf_name)
     
@@ -226,7 +279,6 @@ with tab_settings:
         
     st.divider()
     
-    # --- 題庫管理：重新命名資料夾、PDF 與刪除 ---
     st.subheader("📁 題庫與資料夾管理")
     c.execute("SELECT DISTINCT folder, category FROM questions")
     items = c.fetchall()
@@ -234,7 +286,6 @@ with tab_settings:
     if not items:
         st.info("目前沒有任何題庫資料。")
     else:
-        # 取得所有現有資料夾清單供搬移使用
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
         all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
 
@@ -243,9 +294,7 @@ with tab_settings:
             p_name = row['category']
             
             with st.expander(f"📂 {f_name} ＞ 📄 {p_name}"):
-                # 重新命名 PDF
                 new_p_name = st.text_input("修改 PDF 名稱", value=p_name, key=f"p_rename_{index}")
-                # 移動資料夾
                 target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
                 
                 col_save, col_del = st.columns(2)
@@ -265,7 +314,6 @@ with tab_settings:
                     st.rerun()
 
         st.divider()
-        # 資料夾重新命名專區
         st.subheader("✏️ 資料夾重新命名")
         old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
         new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
