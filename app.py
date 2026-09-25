@@ -7,10 +7,9 @@ import google.generativeai as genai
 
 # ================= 1. 資料庫初始化 & 自動升級 =================
 conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-conn.row_factory = sqlite3.Row # 使用字典方式讀取資料，避免欄位錯位
+conn.row_factory = sqlite3.Row 
 c = conn.cursor()
 
-# 建立基礎資料表
 c.execute('''CREATE TABLE IF NOT EXISTS questions
              (id INTEGER PRIMARY KEY AUTOINCREMENT, 
               category TEXT, text TEXT, 
@@ -18,7 +17,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS questions
               answer TEXT, wrong_count INTEGER DEFAULT 0)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
 
-# 【智慧升級】自動檢查並補上新欄位 (保護舊資料)
 c.execute("PRAGMA table_info(questions)")
 existing_cols = [col['name'] for col in c.fetchall()]
 if 'explanation' not in existing_cols:
@@ -86,7 +84,6 @@ with tab_quiz:
     if not folders:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
     else:
-        # 雙層選單：先選資料夾，再選 PDF
         col_f, col_p = st.columns(2)
         with col_f:
             selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders)
@@ -133,7 +130,6 @@ with tab_quiz:
                         load_next_question(selected_folder, selected_pdf)
                         st.rerun()
                 with col2:
-                    # 判斷這題有沒有預先寫好的詳解
                     has_exp = bool(q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解')
                     btn_label = "📖 查看詳解" if has_exp else "🧠 AI 即時補寫詳解"
                     btn_type = "secondary" if has_exp else "primary"
@@ -151,11 +147,10 @@ with tab_quiz:
                                         model = genai.GenerativeModel('gemini-3.8-flash')
                                         prompt = f"題目：{q['text']}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
                                         response = model.generate_content(prompt)
-                                        # 將生出來的詳解存入資料庫，以後就不必再問 AI
                                         c.execute("UPDATE questions SET explanation=? WHERE id=?", (response.text, q_id))
                                         conn.commit()
                                         st.session_state.explanation = response.text
-                                        st.rerun() # 重新整理載入新詳解
+                                        st.rerun()
                                     except Exception as e:
                                         st.error(f"呼叫 AI 失敗：{e}")
                         
@@ -166,17 +161,21 @@ with tab_quiz:
 with tab_import:
     st.markdown("### 🤖 智慧 PDF 匯入")
     
-    # 選擇或新增資料夾
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
     if folder_choice == "-- ➕ 新增資料夾 --":
-        target_folder = st.text_input("輸入新資料夾名稱 (例如：生化期中考)", "新資料夾")
+        target_folder = st.text_input("輸入新資料夾名稱", "新資料夾")
     else:
         target_folder = folder_choice
         
     uploaded_pdf = st.file_uploader("上傳考卷 PDF，AI 會自動切分並寫詳解！", type="pdf")
+    
+    # 允許自訂義匯入後的 PDF 顯示名稱
+    default_pdf_name = uploaded_pdf.name if uploaded_pdf else ""
+    custom_pdf_name = st.text_input("📄 編輯匯入後的 PDF 名稱：", value=default_pdf_name)
+    
     if st.button("解析並匯入", type="primary") and uploaded_pdf:
         api_key = get_api_key()
         if not api_key: st.error("請先至設定頁面設定 API Key！")
@@ -205,12 +204,12 @@ with tab_import:
                     raw_text = response.text.replace('```json', '').replace('```', '').strip()
                     new_questions = json.loads(raw_text)
                     
-                    pdf_name = uploaded_pdf.name
+                    final_name = custom_pdf_name.strip() if custom_pdf_name else uploaded_pdf.name
                     for nq in new_questions:
                         c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation) VALUES (?,?,?,?,?,?,?,?,?)",
-                                  (target_folder, pdf_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
+                                  (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
                     conn.commit()
-                    st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder}」！")
+                    st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！")
                     st.session_state.current_q = None
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
@@ -227,28 +226,57 @@ with tab_settings:
         
     st.divider()
     
-    # --- 新增：管理與刪除題庫區塊 ---
-    st.subheader("🗑️ 管理題庫")
-    c.execute("SELECT folder, category, COUNT(*) as q_count FROM questions GROUP BY folder, category")
-    pdf_list = c.fetchall()
+    # --- 題庫管理：重新命名資料夾、PDF 與刪除 ---
+    st.subheader("📁 題庫與資料夾管理")
+    c.execute("SELECT DISTINCT folder, category FROM questions")
+    items = c.fetchall()
     
-    if not pdf_list:
+    if not items:
         st.info("目前沒有任何題庫資料。")
     else:
-        for row in pdf_list:
-            col_text, col_btn = st.columns([3, 1])
+        # 取得所有現有資料夾清單供搬移使用
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+        all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+
+        for index, row in enumerate(items):
             f_name = row['folder']
             p_name = row['category']
-            q_cnt = row['q_count']
             
-            col_text.write(f"📂 {f_name} ＞ 📄 {p_name} ({q_cnt} 題)")
-            if col_btn.button("刪除", key=f"del_{f_name}_{p_name}"):
-                c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
+            with st.expander(f"📂 {f_name} ＞ 📄 {p_name}"):
+                # 重新命名 PDF
+                new_p_name = st.text_input("修改 PDF 名稱", value=p_name, key=f"p_rename_{index}")
+                # 移動資料夾
+                target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
+                
+                col_save, col_del = st.columns(2)
+                if col_save.button("💾 儲存變更", key=f"save_{index}"):
+                    c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", 
+                              (new_p_name, target_f, f_name, p_name))
+                    conn.commit()
+                    st.success("✅ 更新成功！")
+                    time.sleep(0.5)
+                    st.rerun()
+                    
+                if col_del.button("🗑️ 刪除此考卷", key=f"del_{index}"):
+                    c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
+                    conn.commit()
+                    st.success("✅ 已刪除！")
+                    time.sleep(0.5)
+                    st.rerun()
+
+        st.divider()
+        # 資料夾重新命名專區
+        st.subheader("✏️ 資料夾重新命名")
+        old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
+        new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
+        if st.button("確認修改資料夾名稱"):
+            if new_folder_name.strip():
+                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
                 conn.commit()
-                st.success(f"✅ 已刪除 {p_name} 考卷與其所有題目！")
-                time.sleep(1) # 讓成功訊息顯示一秒
+                st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
+                time.sleep(0.5)
                 st.rerun()
-    
+
     st.divider()
     st.subheader("📊 錯題排行榜")
     c.execute("SELECT folder, category, text, wrong_count FROM questions WHERE wrong_count > 0 ORDER BY wrong_count DESC LIMIT 10")
