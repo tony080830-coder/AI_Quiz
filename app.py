@@ -95,7 +95,7 @@ with tab_quiz:
                         with st.spinner("AI 正在思考中..."):
                             try:
                                 genai.configure(api_key=api_key)
-                                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                                model = genai.GenerativeModel('gemini-1.5-flash-001')
                                 prompt = f"題目：{q[2]}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
                                 response = model.generate_content(prompt)
                                 st.session_state.explanation = response.text
@@ -115,7 +115,7 @@ with tab_import:
             with st.spinner("AI 努力閱讀 PDF 中 (約需 15-30 秒)..."):
                 try:
                     genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                    model = genai.GenerativeModel('gemini-1.5-flash-001')
                     prompt = '請提取 PDF 中的「選擇題」。忽略非選擇題。若無解答請補上正解。嚴格以 JSON 陣列格式輸出：[{"category":"分類","text":"題目","options":["A","B","C","D"],"answer":"正確選項的完整文字"}]'
                     
                     pdf_part = {"mime_type": "application/pdf", "data": uploaded_pdf.getvalue()}
