@@ -29,15 +29,32 @@ class CursorWrapper:
         self.is_cloud = is_cloud
 
     def execute(self, *args, **kwargs):
+        # 🌟 自動將傳入的 list 參數轉為 tuple，徹底解決 Turso 的 PyTuple 型別限制
+        new_args = list(args)
+        if len(new_args) > 1:
+            if isinstance(new_args[1], list):
+                new_args[1] = tuple(new_args[1])
+            elif new_args[1] is None:
+                new_args[1] = ()
+        if 'parameters' in kwargs:
+            if isinstance(kwargs['parameters'], list):
+                kwargs['parameters'] = tuple(kwargs['parameters'])
+            elif kwargs['parameters'] is None:
+                kwargs['parameters'] = ()
         try:
-            self.cursor.execute(*args, **kwargs)
+            self.cursor.execute(*new_args, **kwargs)
         except Exception as e:
-            # 容錯處理，避免單一查詢失敗讓整個頁面崩潰
             raise e
         return self
 
     def executemany(self, *args, **kwargs):
-        self.cursor.executemany(*args, **kwargs)
+        new_args = list(args)
+        if len(new_args) > 1 and isinstance(new_args[1], (list, tuple)):
+            new_args[1] = [tuple(item) if isinstance(item, list) else item for item in new_args[1]]
+        try:
+            self.cursor.executemany(*new_args, **kwargs)
+        except Exception as e:
+            raise e
         return self
 
     def fetchone(self):
@@ -282,7 +299,8 @@ with tab_quiz:
                 pdf_params.append(selected_folder)
             if only_star_pdf:
                 pdf_query += " AND pdf_starred=1"
-            c.execute(pdf_query, pdf_params)
+            
+            c.execute(pdf_query, tuple(pdf_params))
             pdf_rows = c.fetchall()
             all_available_pdfs = [row['category'] for row in pdf_rows if row['category']]
             pdf_star_map = {row['category']: bool(row['pdf_starred']) for row in pdf_rows}
@@ -315,7 +333,7 @@ with tab_quiz:
                     else:
                         query += " ORDER BY wrong_count DESC, id ASC"
 
-                    c.execute(query, params)
+                    c.execute(query, tuple(params))
                     q_pool = c.fetchall()
 
                     if not q_pool:
@@ -510,7 +528,7 @@ with tab_quiz:
             if curr_wrong:
                 if st.button("⭐ 一鍵將本次答錯的題目加入星號收藏", type="primary"):
                     placeholders = ','.join(['?'] * len(curr_wrong))
-                    c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({placeholders})", list(curr_wrong))
+                    c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({placeholders})", tuple(curr_wrong))
                     conn.commit()
                     st.toast("✅ 本次錯題已全部加為星號收藏！")
                     time.sleep(0.5)
@@ -586,7 +604,7 @@ with tab_review:
         if rev_only_starred:
             query += " AND is_starred=1"
             
-        c.execute(query, params)
+        c.execute(query, tuple(params))
         questions_to_show = c.fetchall()
         
         if not questions_to_show:
@@ -608,10 +626,10 @@ with tab_review:
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區 (輕量極速匯入，防止 504 超時)】 ----------
+# ---------- 【匯入區】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    st.caption("⚡ 採用極速提取架構，上傳後 5~15 秒內即可完成解析並寫入雲端，徹底告別超時！")
+    st.caption("⚡ 採用極速提取架構，上傳後 5~15 秒內即可完成解析並寫入雲端！")
     
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
@@ -646,14 +664,13 @@ with tab_import:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
                     
-                    # 💡 精簡 Prompt：只提取題目、選項、正解，避免長篇解析導致 504 超時
                     prompt = (
                         "請從所提供文件中提取所有「選擇題」（包含單選題、多選題、A~E 或 A~F 多個選項題目、是非題等）。\n"
                         "【提取規範】\n"
                         "1. text（題目）與 options（選項清單）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
                         "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
                         "3. answer：若文件中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
-                        "4. explanation：若文件本身有附解答說明則順帶簡短摘要，若無請填空字串即可（詳解將於使用者做錯時動態生成）。\n"
+                        "4. explanation：若文件本身有附解答說明則順帶簡短摘要，若無請填空字串即可。\n"
                         "5. 格式：嚴格以 JSON 陣列格式輸出，不要包含任何額外問候語。\n"
                         '範例：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
                     )
