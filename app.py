@@ -10,9 +10,8 @@ import xml.etree.ElementTree as ET
 import google.generativeai as genai
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
-# 資料庫網址已預填，請在下方引號中貼入你在 Turso 複製的 Auth Token
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA0MDQzNjUsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.pvGxndjxpchMGWx3x2P1kauk-QLa0qef6gjIh3NVFKEJ7VfZfMUL8QPceVJ94Kx2gtN0zmRZHm5pkGtB6ZtXDw"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA0MTAzMTYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.JehIeLBB34F2du4w48ZvyFZZo4sYYh_jVqmzT-BnDVNTsV6X4ujGUoVMsxHq1kZba-HKzgFCQEfW_AAx6p_9Bw"
 
 IS_CLOUD = False
 CLOUD_ERROR = ""
@@ -122,6 +121,9 @@ if 'is_starred' not in existing_cols:
     c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
 if 'pdf_starred' not in existing_cols:
     c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
+# 🌟 新增動態選項陣列欄位 (支援 5 個以上選項)
+if 'options' not in existing_cols:
+    c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
 conn.commit()
 
 def get_api_key():
@@ -129,7 +131,23 @@ def get_api_key():
     result = c.fetchone()
     return result['value'] if result else ""
 
-# ================= 2. 檔案文字提取工具函式 (免安裝套件) =================
+# 取得題目的完整選項清單 (動態支援 2、4、5、6+ 個選項)
+def get_question_options(q):
+    if 'options' in q and q['options'] and q['options'].strip():
+        try:
+            opts = json.loads(q['options'])
+            if isinstance(opts, list) and len(opts) > 0:
+                return [str(o).strip() for o in opts if str(o).strip()]
+        except Exception:
+            pass
+    # 相容舊版固定 4 欄位資料
+    opts = []
+    for col in ['opt1', 'opt2', 'opt3', 'opt4']:
+        if col in q and q[col] and str(q[col]).strip():
+            opts.append(str(q[col]).strip())
+    return opts if opts else ["A", "B"]
+
+# ================= 2. 檔案文字提取工具函式 =================
 def extract_text_from_docx(file_bytes):
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
@@ -189,7 +207,14 @@ if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs
 
 def check_answer(selected, correct, q_id):
     st.session_state.answered = True
-    if selected == correct:
+    # 支援「完全相符」或字母比對（例如正確答案為 'A'，選了 'A. Glucose'）
+    is_right = (selected == correct)
+    if not is_right and len(correct) == 1 and selected.startswith(correct):
+        is_right = True
+    if not is_right and len(selected) == 1 and correct.startswith(selected):
+        is_right = True
+
+    if is_right:
         st.session_state.is_correct = True
         c.execute("UPDATE questions SET wrong_count = MAX(0, wrong_count - 1) WHERE id=?", (q_id,))
     else:
@@ -329,13 +354,14 @@ with tab_quiz:
                     st.session_state.exam_questions[idx] = c.fetchone()
                     st.rerun()
 
-            options = [curr_q['opt1'], curr_q['opt2'], curr_q['opt3'], curr_q['opt4']]
+            # 🌟 動態取得題目所有選項 (不限 4 個)
+            options = get_question_options(curr_q)
             correct_ans = curr_q['answer']
             q_id = curr_q['id']
 
             if not st.session_state.answered:
-                for opt in options:
-                    if st.button(opt, key=f"ex_btn_{opt}", use_container_width=True):
+                for opt_idx, opt in enumerate(options):
+                    if st.button(opt, key=f"ex_btn_{q_id}_{opt_idx}", use_container_width=True):
                         check_answer(opt, correct_ans, q_id)
                         if st.session_state.is_correct:
                             if q_id not in st.session_state.exam_correct_ids:
@@ -466,12 +492,12 @@ with tab_quiz:
                     c.execute("SELECT * FROM questions WHERE id=?", (qid,))
                     q_data = c.fetchone()
                     if q_data:
+                        opts_review = get_question_options(q_data)
                         with st.expander(f"[{q_data['category']}] {q_data['text'][:30]}..."):
                             st.markdown(f"**題目**：{q_data['text']}")
-                            st.markdown(f"- (A) {q_data['opt1']}")
-                            st.markdown(f"- (B) {q_data['opt2']}")
-                            st.markdown(f"- (C) {q_data['opt3']}")
-                            st.markdown(f"- (D) {q_data['opt4']}")
+                            for i, opt_item in enumerate(opts_review):
+                                label = chr(65 + i) if i < 26 else str(i + 1)
+                                st.markdown(f"- ({label}) {opt_item}")
                             st.markdown(f"✅ **正確答案**：`{q_data['answer']}`")
                             exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
                             st.caption(f"💡 解析：{exp}")
@@ -540,33 +566,33 @@ with tab_review:
             for idx, q in enumerate(questions_to_show):
                 is_st = bool(q['is_starred'])
                 star_tag = "⭐ " if is_st else ""
+                q_opts = get_question_options(q)
                 with st.expander(f"{star_tag}題目 {idx+1}: {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                     st.markdown(f"**【題目】** {q['text']}")
-                    st.markdown(f"- (A) {q['opt1']}")
-                    st.markdown(f"- (B) {q['opt2']}")
-                    st.markdown(f"- (C) {q['opt3']}")
-                    st.markdown(f"- (D) {q['opt4']}")
+                    for opt_i, opt_text in enumerate(q_opts):
+                        opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
+                        st.markdown(f"- ({opt_label}) {opt_text}")
                     st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                     exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解"
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區 (支援 PDF, DOCX, PPTX, TXT)】 ----------
+# ---------- 【匯入區 (支援 5+ 選項與各類文件)】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    st.caption("支援檔案格式：**PDF (.pdf)**、**Word (.docx)**、**PowerPoint (.pptx)**、**文字檔 (.txt, .md)**")
+    st.caption("支援格式：**PDF (.pdf)**、**Word (.docx)**、**PowerPoint (.pptx)**、**文字檔 (.txt, .md)**")
     
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
     if folder_choice == "-- ➕ 新增資料夾 --":
-        target_folder = st.text_input("輸入新資料夾名稱", "新資料夾")
+        target_folder = st.text_input("輸入新資料夾名稱", "生化")
     else:
         target_folder = folder_choice
         
     uploaded_file = st.file_uploader(
-        "上傳題目檔案 (支援 PDF、Word、PowerPoint、文字筆記)", 
+        "上傳題目檔案 (支援任意選項數量，如 A~E、是非題)", 
         type=["pdf", "docx", "pptx", "txt", "md"]
     )
     
@@ -586,38 +612,38 @@ with tab_import:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
                     
+                    # 💡 明確指示支援任意數量選項 (包含 5 個選項 A~E)
                     prompt = (
-                        "請從所提供的文件中提取所有「選擇題」（單選或多選題目）。若文件為投影片或講義，請將其中的課堂練習題、自我檢測題或課後練習題提取出來。\n"
+                        "請從所提供文件中提取所有「選擇題」（包含單選題、多選題、A~E 或 A~F 多個選項題目、是非題等）。\n"
                         "【提取與解析規則】\n"
                         "1. 題目（text）與選項（options）：請完整保留原始語言（若為英文請保留英文，勿翻譯題幹）。\n"
-                        "2. 正確答案（answer）：若檔案中未標明正解，請憑專業知識推導並給出正確答案字母或內容。\n"
-                        "3. 【最重要規則】解析（explanation）：無論題目是英文還是中文，本欄位「一律必須以繁體中文撰寫」！"
+                        "2. 選項陣列（options）：請務必完整收錄該題的所有選項！若有 5 個選項（A~E）就列出 5 個，切勿刪減或只保留前 4 個。\n"
+                        "3. 正確答案（answer）：若檔案中未標明正解，請憑專業知識推導並給出正確答案字母或選項文字。\n"
+                        "4. 【最重要規則】解析（explanation）：無論題目是英文還是中文，本欄位「一律必須以繁體中文撰寫」！"
                         "內容須包含核心考點、專有名詞中文對照、正解依據及錯誤選項為何錯誤。\n"
-                        "4. 輸出格式：嚴格以 JSON 陣列格式輸出，請勿包含 markdown 引號以外的任何雜訊。\n"
-                        '格式範例：[{"category":"分類","text":"題目","options":["A","B","C","D"],"answer":"正確選項","explanation":"繁體中文詳細解析"}]'
+                        "5. 輸出格式：嚴格以 JSON 陣列格式輸出。\n"
+                        '格式範例：[{"category":"生化","text":"題目原文","options":["選項A","選項B","選項C","選項D","選項E"],"answer":"正確選項","explanation":"繁體中文詳細解析"}]'
                     )
                     
-                    # 依副檔名準備輸入給 Gemini 的內容
                     if fname.endswith('.pdf'):
                         gemini_content = [prompt, {"mime_type": "application/pdf", "data": file_bytes}]
                     elif fname.endswith('.docx'):
                         doc_text = extract_text_from_docx(file_bytes)
                         if not doc_text.strip():
-                            raise Exception("無法從該 Word 檔案中提取出文字，請確認內容是否空白。")
+                            raise Exception("無法從該 Word 檔案中提取出文字。")
                         gemini_content = [prompt, f"【以下為 Word 文件 ({uploaded_file.name}) 內容】：\n\n{doc_text}"]
                     elif fname.endswith('.pptx'):
                         ppt_text = extract_text_from_pptx(file_bytes)
                         if not ppt_text.strip():
-                            raise Exception("無法從該 PowerPoint 檔案中提取出文字，請確認投影片是否有純文字內容。")
+                            raise Exception("無法從該 PowerPoint 檔案中提取出文字。")
                         gemini_content = [prompt, f"【以下為 PowerPoint 簡報 ({uploaded_file.name}) 內容】：\n\n{ppt_text}"]
-                    else: # .txt 或 .md
+                    else:
                         try:
                             txt_content = file_bytes.decode('utf-8')
                         except UnicodeDecodeError:
                             txt_content = file_bytes.decode('big5', errors='ignore')
                         gemini_content = [prompt, f"【以下為文字筆記 ({uploaded_file.name}) 內容】：\n\n{txt_content}"]
 
-                    # 呼叫 Gemini (含超額自動重試機制)
                     max_retries = 3
                     response = None
                     for attempt in range(max_retries):
@@ -631,13 +657,28 @@ with tab_import:
                             else:
                                 raise e
                     
-                    raw_text = response.text.replace('```json', '').replace('```', '').strip()
-                    new_questions = json.loads(raw_text)
+                    raw_text = response.text.strip()
+                    # 容錯正規表達式萃取 JSON
+                    match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
+                    clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
+                    new_questions = json.loads(clean_json)
                     final_name = custom_name.strip() if custom_name else uploaded_file.name
                     
+                    # 寫入題庫 (同時存入 options JSON 與傳統欄位以確保相容)
                     for nq in new_questions:
-                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,0,0)",
-                                  (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
+                        raw_opts = nq.get('options', [])
+                        cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
+                        opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
+                        
+                        o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
+                        o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
+                        o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
+                        o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                        
+                        c.execute(
+                            "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                            (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, nq.get('answer', ''), nq.get('explanation', '無提供詳解'))
+                        )
                     conn.commit()
                     st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 except Exception as e:
@@ -668,7 +709,7 @@ with tab_settings:
                         use_container_width=True
                     )
         with col_ul:
-            restore_file = st.file_uploader("選取 .db 檔案以還原", type=["db"], label_visibility="collapsed")
+            restore_file = st.file_uploader("選取 .db檔案以還原", type=["db"], label_visibility="collapsed")
             if restore_file:
                 with open('quiz_database.db', "wb") as f:
                     f.write(restore_file.getvalue())
