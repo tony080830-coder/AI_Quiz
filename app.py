@@ -1,17 +1,33 @@
 import streamlit as st
-import sqlite3
 import json
 import random
 import time
 import os
 import google.generativeai as genai
 
-# ================= 1. 資料庫初始化 & 自動升級 =================
-DB_FILE = 'quiz_database.db'
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+# ================= 0. Turso 雲端 SQLite 連線設定 =================
+# 請將在 Turso 控制台複製的網址與 Token 貼在下方引號中
+TURSO_DB_URL = ""      # 例："libsql://quiz-db-yourname.turso.io"
+TURSO_AUTH_TOKEN = ""  # 你的 Turso 驗證 Token
+
+try:
+    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
+        import libsql_experimental as sqlite3
+        conn = sqlite3.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+        IS_CLOUD = True
+    else:
+        import sqlite3
+        conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+        IS_CLOUD = False
+except Exception as e:
+    import sqlite3
+    conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+    IS_CLOUD = False
+
 conn.row_factory = sqlite3.Row 
 c = conn.cursor()
 
+# ================= 1. 資料庫初始化 & 自動升級 =================
 c.execute('''CREATE TABLE IF NOT EXISTS questions
              (id INTEGER PRIMARY KEY AUTOINCREMENT, 
               category TEXT, text TEXT, 
@@ -25,7 +41,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS exam_history
               correct_ids TEXT, 
               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-# 自動欄位檢查
 c.execute("PRAGMA table_info(questions)")
 existing_cols = [col['name'] for col in c.fetchall()]
 if 'explanation' not in existing_cols:
@@ -49,7 +64,6 @@ if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
 if 'explanation' not in st.session_state: st.session_state.explanation = ""
 
-# 測驗運行狀態
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
 if 'exam_questions' not in st.session_state: st.session_state.exam_questions = []
@@ -72,6 +86,11 @@ def check_answer(selected, correct, q_id):
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
+if IS_CLOUD:
+    st.caption("☁️ 連線狀態：已連線至 Turso 雲端資料庫 (重啟永不丟失)")
+else:
+    st.caption("🖥️ 連線狀態：本地暫存模式 (填入 Turso URL 與 Token 即可啟用自動雲端保存)")
+
 tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與管理"])
 
 # ---------- 【測驗區】 ----------
@@ -82,7 +101,6 @@ with tab_quiz:
     if not folders:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
     else:
-        # 1. 測驗條件設定區 (未啟動測驗時顯示)
         if not st.session_state.exam_active and not st.session_state.exam_finished:
             col_f, col_st = st.columns([2, 1])
             with col_f:
@@ -92,7 +110,6 @@ with tab_quiz:
                 only_star_pdf = st.checkbox("⭐ 僅列星號考卷", value=False)
                 only_star_q = st.checkbox("⭐ 只刷星號題目", value=False)
 
-            # 抓取可選 PDF 清單
             pdf_query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
             pdf_params = []
             if selected_folder != "全部資料夾":
@@ -105,7 +122,6 @@ with tab_quiz:
             all_available_pdfs = [row['category'] for row in pdf_rows if row['category']]
             pdf_star_map = {row['category']: bool(row['pdf_starred']) for row in pdf_rows}
 
-            # 多選 PDF
             selected_pdfs = st.multiselect(
                 "📄 勾選要練習的 PDF 考卷（可複選混合出題）：",
                 options=all_available_pdfs,
@@ -113,7 +129,6 @@ with tab_quiz:
                 format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x
             )
 
-            # 零碎時間題數選單
             col_cnt, col_order = st.columns(2)
             with col_cnt:
                 q_count_option = st.selectbox("⏱️ 練習題數（零碎時間快速刷）：", ["5 題", "10 題", "20 題", "全部題目"])
@@ -143,7 +158,6 @@ with tab_quiz:
                     else:
                         if q_count_option != "全部題目":
                             pick_n = int(q_count_option.replace(" 題", ""))
-                            # 優先取常錯題庫中隨機選出
                             actual_pool = q_pool[:max(pick_n * 2, len(q_pool))]
                             random.shuffle(actual_pool)
                             st.session_state.exam_questions = actual_pool[:pick_n]
@@ -163,22 +177,18 @@ with tab_quiz:
                         st.session_state.explanation = ""
                         st.rerun()
 
-        # 2. 測驗進行中 (隨做隨停)
         elif st.session_state.exam_active and not st.session_state.exam_finished:
             total_q = len(st.session_state.exam_questions)
             idx = st.session_state.exam_index
             curr_q = st.session_state.exam_questions[idx]
 
-            # 進度列與即時戰績
             answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
             st.progress((idx) / total_q)
             col_prog, col_quit = st.columns([3, 1.2])
             with col_prog:
                 st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 已答：對 {len(st.session_state.exam_correct_ids)} / 錯 {len(st.session_state.exam_wrong_ids)}")
             with col_quit:
-                # 隨做隨停按鈕
                 if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
-                    # 結算目前進度
                     if answered_so_far > 0:
                         c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
                                   (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
@@ -187,7 +197,6 @@ with tab_quiz:
                     st.session_state.exam_finished = True
                     st.rerun()
 
-            # 題目卡片
             col_t, col_s = st.columns([4, 1.2])
             is_q_st = bool(curr_q['is_starred'])
             with col_t:
@@ -197,7 +206,6 @@ with tab_quiz:
                     new_star = 0 if is_q_st else 1
                     c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, curr_q['id']))
                     conn.commit()
-                    # 更新當前題目快照
                     c.execute("SELECT * FROM questions WHERE id=?", (curr_q['id'],))
                     st.session_state.exam_questions[idx] = c.fetchone()
                     st.rerun()
@@ -265,23 +273,20 @@ with tab_quiz:
                 if st.session_state.explanation:
                     st.info(st.session_state.explanation)
 
-        # 3. 測驗結算與分析報告
         elif st.session_state.exam_finished:
             st.balloons()
-            st.success("🎉 測驗已結束！以下是本次練習分析報告：")
+            st.success("🎉 測驗已結束！本次練習總結如下：")
 
             curr_wrong = set(st.session_state.exam_wrong_ids)
             curr_correct = set(st.session_state.exam_correct_ids)
             total_tested = len(curr_wrong) + len(curr_correct)
             score = (len(curr_correct) / total_tested * 100) if total_tested > 0 else 0
 
-            # 數據看板
             col_m1, col_m2, col_m3 = st.columns(3)
             col_m1.metric("答對率", f"{score:.1f}%")
             col_m2.metric("🟢 答對題數", f"{len(curr_correct)} 題")
             col_m3.metric("🔴 答錯題數", f"{len(curr_wrong)} 題")
 
-            # 若只選 1 份 PDF，支援新舊兩次對比
             if len(st.session_state.exam_tested_pdfs) == 1:
                 single_pdf = st.session_state.exam_tested_pdfs[0]
                 c.execute("SELECT * FROM exam_history WHERE category=? ORDER BY id DESC LIMIT 2", (single_pdf,))
@@ -299,7 +304,6 @@ with tab_quiz:
 
             st.divider()
 
-            # 一鍵將本次錯題全部加入收藏
             if curr_wrong:
                 if st.button("⭐ 一鍵將本次答錯的題目加入星號收藏", type="primary"):
                     placeholders = ','.join(['?'] * len(curr_wrong))
@@ -323,7 +327,7 @@ with tab_quiz:
                             exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
                             st.caption(f"💡 解析：{exp}")
             else:
-                st.info("太厲害了！本次練習完全沒有錯題！")
+                st.info("太棒了！本次測驗全對，零錯題！")
 
             if st.button("🔄 繼續新的練習 / 重新開始", use_container_width=True):
                 st.session_state.exam_active = False
@@ -445,43 +449,42 @@ with tab_import:
                         c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,0,0)",
                                   (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
                     conn.commit()
-                    st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！")
+                    st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
 
 # ---------- 【設定與管理區】 ----------
 with tab_settings:
-    st.subheader("💾 題庫備份與還原 (防重啟遺失)")
-    st.caption("匯入新考卷或刷完題後，點擊下載備份檔；若伺服器休眠重啟，直接上傳還原即可！")
-    
-    col_dl, col_ul = st.columns(2)
-    with col_dl:
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "rb") as fp:
-                st.download_button(
-                    label="📥 下載題庫備份檔 (.db)",
-                    data=fp,
-                    file_name="quiz_database.db",
-                    mime="application/x-sqlite3",
-                    use_container_width=True
-                )
-    with col_ul:
-        restore_file = st.file_uploader("選取 .db 檔案以還原", type=["db"], label_visibility="collapsed")
-        if restore_file:
-            with open(DB_FILE, "wb") as f:
-                f.write(restore_file.getvalue())
-            st.success("✅ 題庫已成功還原！重新整理頁面中...")
-            time.sleep(1)
-            st.rerun()
-
-    st.divider()
     st.subheader("🔑 API Key 設定")
     current_key = get_api_key()
     new_key = st.text_input("輸入 Gemini API Key", value=current_key, type="password")
     if st.button("儲存設定"):
         c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
         conn.commit()
-        st.success("設定已儲存！")
+        st.success("設定已儲存！" + (" (已同步至雲端)" if IS_CLOUD else ""))
+
+    if not IS_CLOUD:
+        st.divider()
+        st.subheader("💾 本地備份與還原 (未設定 Turso 時可用)")
+        col_dl, col_ul = st.columns(2)
+        with col_dl:
+            if os.path.exists('quiz_database.db'):
+                with open('quiz_database.db', "rb") as fp:
+                    st.download_button(
+                        label="📥 下載題庫備份檔 (.db)",
+                        data=fp,
+                        file_name="quiz_database.db",
+                        mime="application/x-sqlite3",
+                        use_container_width=True
+                    )
+        with col_ul:
+            restore_file = st.file_uploader("選取 .db 檔案以還原", type=["db"], label_visibility="collapsed")
+            if restore_file:
+                with open('quiz_database.db', "wb") as f:
+                    f.write(restore_file.getvalue())
+                st.success("✅ 題庫已成功還原！重新整理頁面中...")
+                time.sleep(1)
+                st.rerun()
 
     st.divider()
     st.subheader("📁 題庫管理 (名稱修改 / 移動 / 星號標記 / 刪除)")
