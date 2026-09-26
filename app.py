@@ -632,10 +632,9 @@ with tab_review:
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區：智慧大批次引擎 (絕不超時、極速無感)】 ----------
+# ---------- 【匯入區：智慧大批次 + 自訂頁數補抓引擎】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    st.caption("⚡ 全新「智慧大批次引擎」：自動將 100 多頁講義精煉為 4~5 批全速解析，徹底杜絕頻率限制與超時！")
     
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
@@ -649,127 +648,194 @@ with tab_import:
     else:
         target_folder = folder_choice
         
-    uploaded_file = st.file_uploader(
-        "上傳題目檔案 (支援任意頁數的 PDF、Word、PPTX、TXT)", 
-        type=["pdf", "docx", "pptx", "txt", "md"]
+    import_mode = st.radio("選擇匯入方式：", ["📁 模式一：檔案直接上傳 (PDF, Word, PPTX, TXT)", "📋 模式二：直接貼上題目純文字 (快速補抓少量題目)"])
+    
+    parse_prompt = (
+        "請從所提供內容中提取出所有的「選擇題」（包含單選、多選、A~E 或 A~F 多個選項、是非題等）。\n"
+        "【嚴格提取規範】\n"
+        "1. text（題目）與 options（選項陣列）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
+        "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
+        "3. answer：若內容中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
+        "4. explanation：若內容本身有附解答說明則填入簡要說明，若無請留空字串 \"\" 即可。\n"
+        "5. 若本頁面中「沒有任何選擇題」，請直接回傳空陣列 [] 即可。\n"
+        "6. 格式：嚴格以標準 JSON 陣列輸出，不要包含任何額外說明文字。\n"
+        '範例格式：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
     )
-    
-    default_name = uploaded_file.name if uploaded_file else ""
-    custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
-    
-    if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
-        api_key = get_api_key()
-        if not api_key: 
-            st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
-        else:
-            fname = uploaded_file.name.lower()
-            file_bytes = uploaded_file.getvalue()
-            final_name = custom_name.strip() if custom_name else uploaded_file.name
-            
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3.8-flash')
-            
-            parse_prompt = (
-                "請從所提供內容中提取出所有的「選擇題」（包含單選、多選、A~E 或 A~F 多個選項、是非題等）。\n"
-                "【嚴格提取規範】\n"
-                "1. text（題目）與 options（選項陣列）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
-                "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
-                "3. answer：若內容中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
-                "4. explanation：若內容本身有附解答說明則填入簡要說明，若無請留空字串 \"\" 即可。\n"
-                "5. 若本頁面中「沒有任何選擇題」，請直接回傳空陣列 [] 即可。\n"
-                "6. 格式：嚴格以標準 JSON 陣列輸出，不要包含任何額外說明文字。\n"
-                '範例格式：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
-            )
 
-            # ---------------- 智慧動態分批邏輯 (大幅減少批次數，杜絕 429) ----------------
-            batches = []
-            
-            if fname.endswith('.pdf'):
-                if not HAS_PYPDF:
-                    st.error("⚠️ 尚未安裝 `pypdf` 套件！請在 GitHub 的 `requirements.txt` 新增一行 `pypdf` 後重試。")
-                    st.stop()
-                
-                reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-                total_pages = len(reader.pages)
-                
-                # 🌟 核心升級：動態大批次（每 25 頁一批，124 頁只要 5 批！）
-                PAGES_PER_BATCH = max(20, (total_pages + 4) // 5)
-                total_batch_count = (total_pages + PAGES_PER_BATCH - 1) // PAGES_PER_BATCH
-                
-                st.info(f"📖 偵測到 PDF 共 **{total_pages}** 頁，系統自動精煉為 **{total_batch_count}** 批全速解析 (約需 40~60 秒)...")
-                
-                for start_p in range(0, total_pages, PAGES_PER_BATCH):
-                    end_p = min(start_p + PAGES_PER_BATCH, total_pages)
-                    
-                    # 測試是否能直接提取純文字 (文字優先，速度快 5 倍且不吃頻寬)
-                    batch_text = ""
-                    for p_i in range(start_p, end_p):
-                        t = reader.pages[p_i].extract_text() or ""
-                        if t.strip():
-                            batch_text += f"\n--- Page {p_i+1} ---\n" + t
-                    
-                    if len(batch_text.strip()) > 100:
-                        batches.append({
-                            "title": f"第 {start_p+1} ~ {end_p} 頁 (文字極速提取)",
-                            "content": [parse_prompt, f"【以下為檔案第 {start_p+1} ~ {end_p} 頁文字內容】：\n\n{batch_text}"]
-                        })
-                    else:
-                        writer = pypdf.PdfWriter()
-                        for p_i in range(start_p, end_p):
-                            writer.add_page(reader.pages[p_i])
-                        sub_buf = io.BytesIO()
-                        writer.write(sub_buf)
-                        batches.append({
-                            "title": f"第 {start_p+1} ~ {end_p} 頁 (圖文光學解析)",
-                            "content": [parse_prompt, {"mime_type": "application/pdf", "data": sub_buf.getvalue()}]
-                        })
-            
-            elif fname.endswith('.docx'):
-                doc_text = extract_text_from_docx(file_bytes)
-                if not doc_text.strip(): st.error("Word 文件內容空白！"); st.stop()
-                batches.append({"title": "Word 全文", "content": [parse_prompt, f"【Word 內容】：\n\n{doc_text}"]})
-                
-            elif fname.endswith('.pptx'):
-                ppt_text = extract_text_from_pptx(file_bytes)
-                if not ppt_text.strip(): st.error("PowerPoint 內容空白！"); st.stop()
-                batches.append({"title": "PPT 全文", "content": [parse_prompt, f"【PPT 內容】：\n\n{ppt_text}"]})
-                
+    if import_mode.startswith("📁 模式一"):
+        uploaded_file = st.file_uploader(
+            "上傳題目檔案 (支援任意頁數的 PDF、Word、PPTX、TXT)", 
+            type=["pdf", "docx", "pptx", "txt", "md"]
+        )
+        
+        default_name = uploaded_file.name if uploaded_file else ""
+        col_n, col_p = st.columns([2, 1])
+        with col_n:
+            custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
+        with col_p:
+            # 🌟 自訂頁數範圍補抓功能
+            page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：81-88", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
+        
+        if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
+            api_key = get_api_key()
+            if not api_key: 
+                st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
             else:
-                try: txt = file_bytes.decode('utf-8')
-                except UnicodeDecodeError: txt = file_bytes.decode('big5', errors='ignore')
-                batches.append({"title": "文字全文", "content": [parse_prompt, f"【文字筆記】：\n\n{txt}"]})
+                fname = uploaded_file.name.lower()
+                file_bytes = uploaded_file.getvalue()
+                final_name = custom_name.strip() if custom_name else uploaded_file.name
+                
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-3.8-flash')
+                
+                batches = []
+                
+                if fname.endswith('.pdf'):
+                    if not HAS_PYPDF:
+                        st.error("⚠️ 尚未安裝 `pypdf` 套件！請在 GitHub 的 `requirements.txt` 新增一行 `pypdf`。")
+                        st.stop()
+                    
+                    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+                    total_pdf_pages = len(reader.pages)
+                    
+                    # 解析指定頁數範圍
+                    start_page_limit = 0
+                    end_page_limit = total_pdf_pages
+                    if page_range_str.strip():
+                        try:
+                            parts = page_range_str.strip().split('-')
+                            start_page_limit = max(0, int(parts[0].strip()) - 1)
+                            end_page_limit = min(total_pdf_pages, int(parts[1].strip()))
+                        except Exception:
+                            st.warning("⚠️ 頁數格式不正確（例如請填寫：81-88），將自動解析全部頁數。")
+                            start_page_limit = 0
+                            end_page_limit = total_pdf_pages
 
-            # ---------------- 開始執行 (只有 5 批，絕不超速) ----------------
-            prog_bar = st.progress(0.0)
-            status_box = st.empty()
-            total_batches = len(batches)
-            total_imported = 0
-            
-            for b_idx, b_info in enumerate(batches):
-                status_box.markdown(f"⏳ **正在全速處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
-                
-                max_retries = 3
-                response = None
-                for attempt in range(max_retries):
-                    try:
-                        response = model.generate_content(b_info['content'], request_options={"timeout": 150})
-                        break
-                    except Exception as e:
-                        if "429" in str(e) and attempt < max_retries - 1:
-                            status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
-                            time.sleep(60)
+                    actual_page_count = end_page_limit - start_page_limit
+                    PAGES_PER_BATCH = max(20, (actual_page_count + 4) // 5) if actual_page_count > 25 else actual_page_count
+                    
+                    st.info(f"📖 目標範圍：第 **{start_page_limit + 1} ~ {end_page_limit}** 頁（共 {actual_page_count} 頁），系統自動排程解析中...")
+                    
+                    for start_p in range(start_page_limit, end_page_limit, PAGES_PER_BATCH):
+                        end_p = min(start_p + PAGES_PER_BATCH, end_page_limit)
+                        
+                        batch_text = ""
+                        for p_i in range(start_p, end_p):
+                            t = reader.pages[p_i].extract_text() or ""
+                            if t.strip():
+                                batch_text += f"\n--- Page {p_i+1} ---\n" + t
+                        
+                        if len(batch_text.strip()) > 100:
+                            batches.append({
+                                "title": f"第 {start_p+1} ~ {end_p} 頁 (文字極速提取)",
+                                "content": [parse_prompt, f"【以下為檔案第 {start_p+1} ~ {end_p} 頁文字內容】：\n\n{batch_text}"]
+                            })
                         else:
-                            st.warning(f"⚠️ {b_info['title']} 略過：{e}")
-                            break
+                            writer = pypdf.PdfWriter()
+                            for p_i in range(start_p, end_p):
+                                writer.add_page(reader.pages[p_i])
+                            sub_buf = io.BytesIO()
+                            writer.write(sub_buf)
+                            batches.append({
+                                "title": f"第 {start_p+1} ~ {end_p} 頁 (圖文光學解析)",
+                                "content": [parse_prompt, {"mime_type": "application/pdf", "data": sub_buf.getvalue()}]
+                            })
                 
-                if response and response.text:
+                elif fname.endswith('.docx'):
+                    doc_text = extract_text_from_docx(file_bytes)
+                    if not doc_text.strip(): st.error("Word 文件空白！"); st.stop()
+                    batches.append({"title": "Word 全文", "content": [parse_prompt, f"【Word 內容】：\n\n{doc_text}"]})
+                    
+                elif fname.endswith('.pptx'):
+                    ppt_text = extract_text_from_pptx(file_bytes)
+                    if not ppt_text.strip(): st.error("PPT 簡報空白！"); st.stop()
+                    batches.append({"title": "PPT 全文", "content": [parse_prompt, f"【PPT 內容】：\n\n{ppt_text}"]})
+                    
+                else:
+                    try: txt = file_bytes.decode('utf-8')
+                    except UnicodeDecodeError: txt = file_bytes.decode('big5', errors='ignore')
+                    batches.append({"title": "文字全文", "content": [parse_prompt, f"【文字內容】：\n\n{txt}"]})
+
+                prog_bar = st.progress(0.0)
+                status_box = st.empty()
+                total_batches = len(batches)
+                total_imported = 0
+                
+                for b_idx, b_info in enumerate(batches):
+                    status_box.markdown(f"⏳ **正在全速處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
+                    
+                    max_retries = 3
+                    response = None
+                    for attempt in range(max_retries):
+                        try:
+                            response = model.generate_content(b_info['content'], request_options={"timeout": 150})
+                            break
+                        except Exception as e:
+                            if "429" in str(e) and attempt < max_retries - 1:
+                                status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
+                                time.sleep(60)
+                            else:
+                                st.warning(f"⚠️ {b_info['title']} 略過：{e}")
+                                break
+                    
+                    if response and response.text:
+                        try:
+                            raw_text = response.text.strip()
+                            match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
+                            clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
+                            chunk_questions = json.loads(clean_json) if clean_json and clean_json != "[]" else []
+                            
+                            for nq in chunk_questions:
+                                raw_opts = nq.get('options', [])
+                                cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
+                                o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
+                                o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
+                                o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
+                                o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                                
+                                c.execute(
+                                    "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                    (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
+                                )
+                            conn.commit()
+                            total_imported += len(chunk_questions)
+                        except Exception:
+                            pass
+                    
+                    prog_bar.progress((b_idx + 1) / total_batches)
+                    time.sleep(2)
+                
+                status_box.empty()
+                prog_bar.empty()
+                if total_imported > 0:
+                    st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                else:
+                    st.warning("處理完畢，但未在檔案所選範圍中找到符合標準格式的選擇題。")
+
+    else:
+        st.info("💡 **文字貼上模式**：在 PDF 中選取未匯入的頁數文字直接貼上，免重傳檔案，瞬間追加！")
+        pname = st.text_input("📄 考卷/講義名稱 (務必填寫相同名稱以自動追加)：", value="CH21.pdf")
+        ptext = st.text_area("請在此貼上題目文字：", height=250, placeholder="例如：\n1. What is...\nA. ...\nB. ...")
+        
+        if st.button("🚀 解析貼上內容並匯入", type="primary") and ptext.strip():
+            api_key = get_api_key()
+            if not api_key:
+                st.error("請至「⚙️ 設定與管理」輸入 API Key！")
+            else:
+                with st.spinner("AI 正在提取純文字題目中 (約需 5~10 秒)..."):
                     try:
+                        genai.configure(api_key=api_key)
+                        model = genai.GenerativeModel('gemini-3.8-flash')
+                        response = model.generate_content([parse_prompt, f"【以下為題目文字】：\n\n{ptext}"], request_options={"timeout": 120})
+                        
                         raw_text = response.text.strip()
                         match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
                         clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
-                        chunk_questions = json.loads(clean_json) if clean_json and clean_json != "[]" else []
+                        new_questions = json.loads(clean_json)
+                        final_pname = pname.strip() if pname.strip() else "未命名考卷"
                         
-                        for nq in chunk_questions:
+                        for nq in new_questions:
                             raw_opts = nq.get('options', [])
                             cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
                             opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
@@ -780,22 +846,12 @@ with tab_import:
                             
                             c.execute(
                                 "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
+                                (target_folder, final_pname, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
                             )
                         conn.commit()
-                        total_imported += len(chunk_questions)
-                    except Exception:
-                        pass
-                
-                prog_bar.progress((b_idx + 1) / total_batches)
-                time.sleep(2)  # 批次間安全緩衝 2 秒
-            
-            status_box.empty()
-            prog_bar.empty()
-            if total_imported > 0:
-                st.success(f"🎉 恭喜！整份 124 頁文件已全數分析完畢，共成功匯入 **{total_imported}** 題至「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
-            else:
-                st.warning("處理完畢，但未在檔案中找到符合標準格式的選擇題。")
+                        st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                    except Exception as e:
+                        st.error(f"解析失敗，詳細錯誤：{e}")
 
 # ---------- 【設定與管理區】 ----------
 with tab_settings:
