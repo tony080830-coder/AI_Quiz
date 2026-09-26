@@ -6,25 +6,95 @@ import os
 import google.generativeai as genai
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
-# 請將在 Turso 控制台複製的網址與 Token 貼在下方引號中
-TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"      # 例："libsql://quiz-db-yourname.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJDRUFwOHJsZ0VmR0R1MDdXRWFlUHR3Iiwib3JnX2lkIjoxMDAwMjU0OTEzfQ.Qa4_xPGT1uowZV9gdyj4hux4Kz5ESoQvIhEHbNoHI6ciad6h9dQrP-ekbJyrHJbjlWObzuhCMnCDiWP9CX6iBg"  # 你的 Turso 驗證 Token
+# 請在下方引號中填入你在 Turso 複製的資訊
+TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"      # 例如："libsql://quiz-db-xxx.turso.io"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJDRUFwOHJsZ0VmR0R1MDdXRWFlUHR3Iiwib3JnX2lkIjoxMDAwMjU0OTEzfQ.Qa4_xPGT1uowZV9gdyj4hux4Kz5ESoQvIhEHbNoHI6ciad6h9dQrP-ekbJyrHJbjlWObzuhCMnCDiWP9CX6iBg"  # 你的 Turso 驗證金鑰
 
-try:
-    if TURSO_DB_URL and TURSO_AUTH_TOKEN:
-        import libsql_experimental as sqlite3
-        conn = sqlite3.connect(TURSO_DB_URL, auth_token=TURSO_AUTH_TOKEN)
+IS_CLOUD = False
+CLOUD_ERROR = ""
+db_conn = None
+
+# 資料列包裝器：相容 row['key'] 與 row[0]
+class RowDict(dict):
+    def __getitem__(self, item):
+        if isinstance(item, int):
+            return list(self.values())[item]
+        return super().__getitem__(item)
+
+class CursorWrapper:
+    def __init__(self, cursor, is_cloud):
+        self.cursor = cursor
+        self.is_cloud = is_cloud
+
+    def execute(self, *args, **kwargs):
+        self.cursor.execute(*args, **kwargs)
+        return self
+
+    def executemany(self, *args, **kwargs):
+        self.cursor.executemany(*args, **kwargs)
+        return self
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+        if hasattr(row, 'keys'):
+            return row
+        if isinstance(row, dict):
+            return row
+        if self.cursor.description:
+            cols = [col[0] for col in self.cursor.description]
+            return RowDict(zip(cols, row))
+        return row
+
+    def fetchall(self):
+        rows = self.cursor.fetchall()
+        if not rows:
+            return []
+        if hasattr(rows[0], 'keys') or isinstance(rows[0], dict):
+            return rows
+        if self.cursor.description:
+            cols = [col[0] for col in self.cursor.description]
+            return [RowDict(zip(cols, r)) for r in rows]
+        return rows
+
+class DBWrapper:
+    def __init__(self, conn, is_cloud):
+        self.conn = conn
+        self.is_cloud = is_cloud
+        if not is_cloud:
+            import sqlite3
+            self.conn.row_factory = sqlite3.Row
+
+    def cursor(self):
+        return CursorWrapper(self.conn.cursor(), self.is_cloud)
+
+    def commit(self):
+        return self.conn.commit()
+
+# 連線判定
+if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
+    try:
+        import libsql_experimental as libsql
+        raw_conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
+        test_cur = raw_conn.cursor()
+        test_cur.execute("SELECT 1")
+        test_cur.fetchall()
+        db_conn = DBWrapper(raw_conn, is_cloud=True)
         IS_CLOUD = True
-    else:
+    except Exception as e:
+        CLOUD_ERROR = str(e)
         import sqlite3
-        conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+        raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+        db_conn = DBWrapper(raw_conn, is_cloud=False)
         IS_CLOUD = False
-except Exception as e:
+else:
     import sqlite3
-    conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+    raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+    db_conn = DBWrapper(raw_conn, is_cloud=False)
     IS_CLOUD = False
 
-conn.row_factory = sqlite3.Row 
+conn = db_conn
 c = conn.cursor()
 
 # ================= 1. 資料庫初始化 & 自動升級 =================
@@ -86,10 +156,18 @@ def check_answer(selected, correct, q_id):
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
+# 即時連線診斷提示
 if IS_CLOUD:
-    st.caption("☁️ 連線狀態：已連線至 Turso 雲端資料庫 (重啟永不丟失)")
+    st.success("☁️ 連線狀態：已成功連線至 Turso 雲端資料庫！(重開機資料永不丟失)")
 else:
-    st.caption("🖥️ 連線狀態：本地暫存模式 (填入 Turso URL 與 Token 即可啟用自動雲端保存)")
+    if CLOUD_ERROR:
+        st.error(f"⚠️ Turso 雲端連線失敗原因：`{CLOUD_ERROR}`")
+        if "libsql_experimental" in CLOUD_ERROR:
+            st.info("💡 提示：伺服器正在安裝 `libsql-experimental` 套件中，請至 GitHub 確認 `requirements.txt` 已填妥並稍候 1~2 分鐘重新整理。")
+        elif "token" in CLOUD_ERROR.lower() or "unauthorized" in CLOUD_ERROR.lower():
+            st.info("💡 提示：請檢查 `app.py` 中的 Turso Token 是否複製完整。")
+    else:
+        st.caption("🖥️ 連線狀態：本地暫存模式 (請在 app.py 填寫 Turso URL 與 Token)")
 
 tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與管理"])
 
