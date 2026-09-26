@@ -3,18 +3,21 @@ import json
 import random
 import time
 import os
+import io
+import re
+import zipfile
+import xml.etree.ElementTree as ET
 import google.generativeai as genai
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
-# 請在下方引號中填入你在 Turso 複製的資訊
-TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"      # 例如："libsql://quiz-db-xxx.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTAzOTc3MjEsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.QWanRwMkLrZ-I3XwA5cBzSWbe6Zl-R1iEM9eASmcIwvCuq3bk_dyFLr4Wn3U86nvIDMPi15N7TunVVihujxpAw"  # 你的 Turso 驗證金鑰
+# 資料庫網址已預填，請在下方引號中貼入你在 Turso 複製的 Auth Token
+TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA0MDQzNjUsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.pvGxndjxpchMGWx3x2P1kauk-QLa0qef6gjIh3NVFKEJ7VfZfMUL8QPceVJ94Kx2gtN0zmRZHm5pkGtB6ZtXDw"
 
 IS_CLOUD = False
 CLOUD_ERROR = ""
 db_conn = None
 
-# 資料列包裝器：相容 row['key'] 與 row[0]
 class RowDict(dict):
     def __getitem__(self, item):
         if isinstance(item, int):
@@ -38,9 +41,7 @@ class CursorWrapper:
         row = self.cursor.fetchone()
         if row is None:
             return None
-        if hasattr(row, 'keys'):
-            return row
-        if isinstance(row, dict):
+        if hasattr(row, 'keys') or isinstance(row, dict):
             return row
         if self.cursor.description:
             cols = [col[0] for col in self.cursor.description]
@@ -128,7 +129,50 @@ def get_api_key():
     result = c.fetchone()
     return result['value'] if result else ""
 
-# ================= 2. 狀態管理 =================
+# ================= 2. 檔案文字提取工具函式 (免安裝套件) =================
+def extract_text_from_docx(file_bytes):
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+            if 'word/document.xml' not in z.namelist():
+                return ""
+            xml_content = z.read('word/document.xml')
+            tree = ET.fromstring(xml_content)
+            paragraphs = []
+            for node in tree.iter():
+                if node.tag.endswith('p'):
+                    texts = [child.text for child in node.iter() if child.tag.endswith('t') and child.text]
+                    if texts:
+                        paragraphs.append("".join(texts))
+            return "\n".join(paragraphs)
+    except Exception as e:
+        return f"[Word 提取錯誤: {e}]"
+
+def extract_text_from_pptx(file_bytes):
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+            slide_files = [f for f in z.namelist() if 'ppt/slides/slide' in f and f.endswith('.xml')]
+            def get_slide_num(s):
+                m = re.search(r'slide(\d+)\.xml', s)
+                return int(m.group(1)) if m else 0
+            slide_files.sort(key=get_slide_num)
+            
+            slides_text = []
+            for idx, sfile in enumerate(slide_files, start=1):
+                xml_content = z.read(sfile)
+                tree = ET.fromstring(xml_content)
+                slide_paragraphs = []
+                for node in tree.iter():
+                    if node.tag.endswith('p'):
+                        texts = [child.text for child in node.iter() if child.tag.endswith('t') and child.text]
+                        if texts:
+                            slide_paragraphs.append("".join(texts))
+                if slide_paragraphs:
+                    slides_text.append(f"--- Slide {idx} ---\n" + "\n".join(slide_paragraphs))
+            return "\n\n".join(slides_text)
+    except Exception as e:
+        return f"[PPT 提取錯誤: {e}]"
+
+# ================= 3. 狀態管理 =================
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
@@ -140,6 +184,7 @@ if 'exam_questions' not in st.session_state: st.session_state.exam_questions = [
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = []
 if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
+if 'exam_skipped_ids' not in st.session_state: st.session_state.exam_skipped_ids = []
 if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs = []
 
 def check_answer(selected, correct, q_id):
@@ -152,20 +197,15 @@ def check_answer(selected, correct, q_id):
         c.execute("UPDATE questions SET wrong_count = wrong_count + 1 WHERE id=?", (q_id,))
     conn.commit()
 
-# ================= 3. 網頁介面開始 =================
+# ================= 4. 網頁介面開始 =================
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
-# 即時連線診斷提示
 if IS_CLOUD:
     st.success("☁️ 連線狀態：已成功連線至 Turso 雲端資料庫！(重開機資料永不丟失)")
 else:
     if CLOUD_ERROR:
         st.error(f"⚠️ Turso 雲端連線失敗原因：`{CLOUD_ERROR}`")
-        if "libsql_experimental" in CLOUD_ERROR:
-            st.info("💡 提示：伺服器正在安裝 `libsql-experimental` 套件中，請至 GitHub 確認 `requirements.txt` 已填妥並稍候 1~2 分鐘重新整理。")
-        elif "token" in CLOUD_ERROR.lower() or "unauthorized" in CLOUD_ERROR.lower():
-            st.info("💡 提示：請檢查 `app.py` 中的 Turso Token 是否複製完整。")
     else:
         st.caption("🖥️ 連線狀態：本地暫存模式 (請在 app.py 填寫 Turso URL 與 Token)")
 
@@ -177,7 +217,7 @@ with tab_quiz:
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     if not folders:
-        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
+        st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
     else:
         if not st.session_state.exam_active and not st.session_state.exam_finished:
             col_f, col_st = st.columns([2, 1])
@@ -201,7 +241,7 @@ with tab_quiz:
             pdf_star_map = {row['category']: bool(row['pdf_starred']) for row in pdf_rows}
 
             selected_pdfs = st.multiselect(
-                "📄 勾選要練習的 PDF 考卷（可複選混合出題）：",
+                "📄 勾選要練習的考卷 / 講義（可複選混合出題）：",
                 options=all_available_pdfs,
                 default=all_available_pdfs[:1] if all_available_pdfs else [],
                 format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x
@@ -215,7 +255,7 @@ with tab_quiz:
 
             if st.button("🚀 開始測驗", type="primary", use_container_width=True):
                 if not selected_pdfs:
-                    st.error("請至少勾選一份 PDF 考卷！")
+                    st.error("請至少勾選一份考卷或講義！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
                     query = f"SELECT * FROM questions WHERE category IN ({placeholders})"
@@ -248,6 +288,7 @@ with tab_quiz:
                         st.session_state.exam_index = 0
                         st.session_state.exam_wrong_ids = []
                         st.session_state.exam_correct_ids = []
+                        st.session_state.exam_skipped_ids = []
                         st.session_state.exam_tested_pdfs = selected_pdfs
                         st.session_state.exam_active = True
                         st.session_state.exam_finished = False
@@ -260,13 +301,13 @@ with tab_quiz:
             idx = st.session_state.exam_index
             curr_q = st.session_state.exam_questions[idx]
 
-            answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
             st.progress((idx) / total_q)
             col_prog, col_quit = st.columns([3, 1.2])
             with col_prog:
-                st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 已答：對 {len(st.session_state.exam_correct_ids)} / 錯 {len(st.session_state.exam_wrong_ids)}")
+                st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 對：{len(st.session_state.exam_correct_ids)} / 錯：{len(st.session_state.exam_wrong_ids)} / 略過：{len(st.session_state.exam_skipped_ids)}")
             with col_quit:
                 if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
+                    answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                     if answered_so_far > 0:
                         c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
                                   (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
@@ -303,6 +344,27 @@ with tab_quiz:
                             if q_id not in st.session_state.exam_wrong_ids:
                                 st.session_state.exam_wrong_ids.append(q_id)
                         st.rerun()
+                
+                st.write("")
+                if st.button("⏭️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
+                    if q_id not in st.session_state.exam_skipped_ids:
+                        st.session_state.exam_skipped_ids.append(q_id)
+                    
+                    is_last = (idx + 1 >= total_q)
+                    if is_last:
+                        answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
+                        if answered_so_far > 0:
+                            c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                      (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                            conn.commit()
+                        st.session_state.exam_active = False
+                        st.session_state.exam_finished = True
+                    else:
+                        st.session_state.exam_index += 1
+                        st.session_state.answered = False
+                        st.session_state.explanation = ""
+                    st.rerun()
+
             else:
                 if st.session_state.is_correct:
                     st.success("✅ 答對了！")
@@ -335,11 +397,18 @@ with tab_quiz:
                             api_key = get_api_key()
                             if not api_key: st.error("請至設定輸入 API Key！")
                             else:
-                                with st.spinner("AI 正在為這題撰寫詳解..."):
+                                with st.spinner("AI 正在撰寫繁體中文詳解..."):
                                     try:
                                         genai.configure(api_key=api_key)
                                         model = genai.GenerativeModel('gemini-3.8-flash')
-                                        prompt = f"題目：{curr_q['text']}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
+                                        prompt = (
+                                            f"題目：{curr_q['text']}\n"
+                                            f"選項：{options}\n"
+                                            f"正解：{correct_ans}\n\n"
+                                            "【重要規則】\n"
+                                            "1. 無論題目是英文或中文，詳解「一律以繁體中文」撰寫。\n"
+                                            "2. 請點出重要專有名詞中文對照，詳述正解依據及錯誤選項原因。"
+                                        )
                                         resp = model.generate_content(prompt)
                                         c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text, q_id))
                                         conn.commit()
@@ -357,13 +426,15 @@ with tab_quiz:
 
             curr_wrong = set(st.session_state.exam_wrong_ids)
             curr_correct = set(st.session_state.exam_correct_ids)
-            total_tested = len(curr_wrong) + len(curr_correct)
-            score = (len(curr_correct) / total_tested * 100) if total_tested > 0 else 0
+            skipped_cnt = len(st.session_state.exam_skipped_ids)
+            actual_tested = len(curr_wrong) + len(curr_correct)
+            score = (len(curr_correct) / actual_tested * 100) if actual_tested > 0 else 0
 
-            col_m1, col_m2, col_m3 = st.columns(3)
-            col_m1.metric("答對率", f"{score:.1f}%")
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("實作答對率", f"{score:.1f}%")
             col_m2.metric("🟢 答對題數", f"{len(curr_correct)} 題")
             col_m3.metric("🔴 答錯題數", f"{len(curr_wrong)} 題")
+            col_m4.metric("⏭️ 略過題數", f"{skipped_cnt} 題")
 
             if len(st.session_state.exam_tested_pdfs) == 1:
                 single_pdf = st.session_state.exam_tested_pdfs[0]
@@ -414,11 +485,12 @@ with tab_quiz:
                 st.session_state.exam_index = 0
                 st.session_state.exam_wrong_ids = []
                 st.session_state.exam_correct_ids = []
+                st.session_state.exam_skipped_ids = []
                 st.rerun()
 
 # ---------- 【錯題總覽區】 ----------
 with tab_review:
-    st.markdown("### 📖 各 PDF 完整題目與答案總覽")
+    st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
@@ -437,7 +509,7 @@ with tab_review:
             rev_pdfs = [row['category'] for row in rev_rows if row['category']]
             rev_star_map = {row['category']: bool(row['pdf_starred']) for row in rev_rows}
             rev_pdf = st.selectbox(
-                "📄 選擇 PDF 考卷：", 
+                "📄 選擇考卷 / 講義：", 
                 ["全部考卷"] + rev_pdfs, 
                 key="rev_pdf",
                 format_func=lambda x: f"⭐ {x}" if rev_star_map.get(x) else x
@@ -479,9 +551,11 @@ with tab_review:
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區】 ----------
+# ---------- 【匯入區 (支援 PDF, DOCX, PPTX, TXT)】 ----------
 with tab_import:
-    st.markdown("### 🤖 智慧 PDF 匯入")
+    st.markdown("### 🤖 智慧題庫匯入")
+    st.caption("支援檔案格式：**PDF (.pdf)**、**Word (.docx)**、**PowerPoint (.pptx)**、**文字檔 (.txt, .md)**")
+    
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
@@ -491,37 +565,75 @@ with tab_import:
     else:
         target_folder = folder_choice
         
-    uploaded_pdf = st.file_uploader("上傳考卷 PDF，AI 會自動切分並寫詳解！", type="pdf")
-    default_pdf_name = uploaded_pdf.name if uploaded_pdf else ""
-    custom_pdf_name = st.text_input("📄 編輯匯入後的 PDF 名稱：", value=default_pdf_name)
+    uploaded_file = st.file_uploader(
+        "上傳題目檔案 (支援 PDF、Word、PowerPoint、文字筆記)", 
+        type=["pdf", "docx", "pptx", "txt", "md"]
+    )
     
-    if st.button("解析並匯入", type="primary") and uploaded_pdf:
+    default_name = uploaded_file.name if uploaded_file else ""
+    custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
+    
+    if st.button("解析並匯入", type="primary") and uploaded_file:
         api_key = get_api_key()
-        if not api_key: st.error("請先到設定頁面輸入 API Key！")
+        if not api_key: 
+            st.error("請先到設定頁面輸入 API Key！")
         else:
-            with st.spinner("AI 努力閱讀並撰寫詳解中 (約需 15-30 秒)..."):
+            fname = uploaded_file.name.lower()
+            file_bytes = uploaded_file.getvalue()
+            
+            with st.spinner(f"AI 正在閱讀「{uploaded_file.name}」並編寫繁體中文詳解中..."):
                 try:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
-                    prompt = '請提取 PDF 中的「選擇題」。若無解答請補上正解，並為每一題撰寫詳細的解析。嚴格以 JSON 陣列格式輸出：[{"category":"分類","text":"題目","options":["A","B","C","D"],"answer":"正確選項","explanation":"詳細的解題觀念與原因"}]'
-                    pdf_part = {"mime_type": "application/pdf", "data": uploaded_pdf.getvalue()}
                     
+                    prompt = (
+                        "請從所提供的文件中提取所有「選擇題」（單選或多選題目）。若文件為投影片或講義，請將其中的課堂練習題、自我檢測題或課後練習題提取出來。\n"
+                        "【提取與解析規則】\n"
+                        "1. 題目（text）與選項（options）：請完整保留原始語言（若為英文請保留英文，勿翻譯題幹）。\n"
+                        "2. 正確答案（answer）：若檔案中未標明正解，請憑專業知識推導並給出正確答案字母或內容。\n"
+                        "3. 【最重要規則】解析（explanation）：無論題目是英文還是中文，本欄位「一律必須以繁體中文撰寫」！"
+                        "內容須包含核心考點、專有名詞中文對照、正解依據及錯誤選項為何錯誤。\n"
+                        "4. 輸出格式：嚴格以 JSON 陣列格式輸出，請勿包含 markdown 引號以外的任何雜訊。\n"
+                        '格式範例：[{"category":"分類","text":"題目","options":["A","B","C","D"],"answer":"正確選項","explanation":"繁體中文詳細解析"}]'
+                    )
+                    
+                    # 依副檔名準備輸入給 Gemini 的內容
+                    if fname.endswith('.pdf'):
+                        gemini_content = [prompt, {"mime_type": "application/pdf", "data": file_bytes}]
+                    elif fname.endswith('.docx'):
+                        doc_text = extract_text_from_docx(file_bytes)
+                        if not doc_text.strip():
+                            raise Exception("無法從該 Word 檔案中提取出文字，請確認內容是否空白。")
+                        gemini_content = [prompt, f"【以下為 Word 文件 ({uploaded_file.name}) 內容】：\n\n{doc_text}"]
+                    elif fname.endswith('.pptx'):
+                        ppt_text = extract_text_from_pptx(file_bytes)
+                        if not ppt_text.strip():
+                            raise Exception("無法從該 PowerPoint 檔案中提取出文字，請確認投影片是否有純文字內容。")
+                        gemini_content = [prompt, f"【以下為 PowerPoint 簡報 ({uploaded_file.name}) 內容】：\n\n{ppt_text}"]
+                    else: # .txt 或 .md
+                        try:
+                            txt_content = file_bytes.decode('utf-8')
+                        except UnicodeDecodeError:
+                            txt_content = file_bytes.decode('big5', errors='ignore')
+                        gemini_content = [prompt, f"【以下為文字筆記 ({uploaded_file.name}) 內容】：\n\n{txt_content}"]
+
+                    # 呼叫 Gemini (含超額自動重試機制)
                     max_retries = 3
                     response = None
                     for attempt in range(max_retries):
                         try:
-                            response = model.generate_content([prompt, pdf_part])
+                            response = model.generate_content(gemini_content)
                             break
                         except Exception as e:
                             if "429" in str(e) and attempt < max_retries - 1:
-                                st.warning(f"⏳ 觸發 API 限制，等待 60 秒後重試... ({attempt + 1}/{max_retries})")
+                                st.warning(f"⏳ 觸發 API 頻率限制，等待 60 秒後重試... ({attempt + 1}/{max_retries})")
                                 time.sleep(60)
                             else:
                                 raise e
                     
                     raw_text = response.text.replace('```json', '').replace('```', '').strip()
                     new_questions = json.loads(raw_text)
-                    final_name = custom_pdf_name.strip() if custom_pdf_name else uploaded_pdf.name
+                    final_name = custom_name.strip() if custom_name else uploaded_file.name
                     
                     for nq in new_questions:
                         c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,0,0)",
@@ -582,7 +694,7 @@ with tab_settings:
             
             exp_title = f"{'⭐ ' if is_pdf_st else ''}📂 {f_name} ＞ 📄 {p_name}"
             with st.expander(exp_title):
-                new_p_name = st.text_input("修改 PDF 名稱", value=p_name, key=f"p_rename_{index}")
+                new_p_name = st.text_input("修改名稱", value=p_name, key=f"p_rename_{index}")
                 target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
                 
                 col_save, col_star_pdf, col_del = st.columns(3)
@@ -603,7 +715,7 @@ with tab_settings:
                     conn.commit()
                     st.rerun()
                     
-                if col_del.button("🗑️ 刪除考卷", key=f"del_{index}", use_container_width=True):
+                if col_del.button("🗑️ 刪除此卷", key=f"del_{index}", use_container_width=True):
                     c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
                     c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
                     conn.commit()
