@@ -8,7 +8,7 @@ import google.generativeai as genai
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 # 請在下方引號中填入你在 Turso 複製的資訊
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"      # 例如："libsql://quiz-db-xxx.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJDRUFwOHJsZ0VmR0R1MDdXRWFlUHR3Iiwib3JnX2lkIjoxMDAwMjU0OTEzfQ.Qa4_xPGT1uowZV9gdyj4hux4Kz5ESoQvIhEHbNoHI6ciad6h9dQrP-ekbJyrHJbjlWObzuhCMnCDiWP9CX6iBg"  # 你的 Turso 驗證金鑰
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTAzOTc3MjEsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.QWanRwMkLrZ-I3XwA5cBzSWbe6Zl-R1iEM9eASmcIwvCuq3bk_dyFLr4Wn3U86nvIDMPi15N7TunVVihujxpAw"  # 你的 Turso 驗證金鑰
 
 IS_CLOUD = False
 CLOUD_ERROR = ""
