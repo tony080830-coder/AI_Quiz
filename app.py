@@ -29,7 +29,7 @@ class CursorWrapper:
         self.is_cloud = is_cloud
 
     def execute(self, *args, **kwargs):
-        # 🌟 自動將傳入的 list 參數轉為 tuple，徹底解決 Turso 的 PyTuple 型別限制
+        # 自動將傳入的 list 參數強制轉為 tuple，徹底解決 Turso 的 PyTuple 型別限制
         new_args = list(args)
         if len(new_args) > 1:
             if isinstance(new_args[1], list):
@@ -167,6 +167,7 @@ def get_api_key():
     except Exception:
         return ""
 
+# 動態取得題目的完整選項清單（相容 2、4、5、6+ 個選項）
 def get_question_options(q):
     if 'options' in q and q['options'] and str(q['options']).strip():
         try:
@@ -181,7 +182,7 @@ def get_question_options(q):
             opts.append(str(q[col]).strip())
     return opts if opts else ["A", "B"]
 
-# ================= 2. 檔案文字提取工具函式 =================
+# ================= 2. 檔案文字提取工具函式 (免額外套件) =================
 def extract_text_from_docx(file_bytes):
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
@@ -411,6 +412,7 @@ with tab_quiz:
                         st.rerun()
                 
                 st.write("")
+                # 略過此題按鈕（不計錯、不影響統計與錯題本）
                 if st.button("⏭️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
                     if q_id not in st.session_state.exam_skipped_ids:
                         st.session_state.exam_skipped_ids.append(q_id)
@@ -473,11 +475,11 @@ with tab_quiz:
                                             f"選項：{options}\n"
                                             f"正確答案：{correct_ans}\n\n"
                                             "【作答規範】\n"
-                                            "1. 無論題目原文是英文還是中文，詳解一律必須使用「繁體中文（台灣醫學用語）」撰寫。\n"
+                                            "1. 無論題目原文是英文還是中文，詳解一律必須使用「繁體中文（台灣醫學常用語）」撰寫。\n"
                                             "2. 請點出關鍵核心考點與專有名詞中英對照。\n"
                                             "3. 詳細說明正解正確之原因，並逐一剖析其他錯誤選項錯在哪裡。"
                                         )
-                                        resp = model.generate_content(prompt)
+                                        resp = model.generate_content(prompt, request_options={"timeout": 300})
                                         new_exp = resp.text.strip()
                                         c.execute("UPDATE questions SET explanation=? WHERE id=?", (new_exp, q_id))
                                         conn.commit()
@@ -626,10 +628,10 @@ with tab_review:
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區】 ----------
+# ---------- 【匯入區 (輕量極速提取 + 300 秒超時保護)】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    st.caption("⚡ 採用極速提取架構，上傳後 5~15 秒內即可完成解析並寫入雲端！")
+    st.caption("⚡ 具備 300 秒逾時保護與極速提取架構，支援超長講義解析！")
     
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
@@ -659,7 +661,7 @@ with tab_import:
             fname = uploaded_file.name.lower()
             file_bytes = uploaded_file.getvalue()
             
-            with st.spinner(f"AI 正在極速掃描「{uploaded_file.name}」提取題目中 (約需 5~15 秒)..."):
+            with st.spinner(f"AI 正在掃描「{uploaded_file.name}」提取題目中 (較大文件請稍候 30~60 秒)..."):
                 try:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
@@ -668,7 +670,7 @@ with tab_import:
                         "請從所提供文件中提取所有「選擇題」（包含單選題、多選題、A~E 或 A~F 多個選項題目、是非題等）。\n"
                         "【提取規範】\n"
                         "1. text（題目）與 options（選項清單）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
-                        "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
+                        "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請完整列出 5 個，切勿省略）。\n"
                         "3. answer：若文件中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
                         "4. explanation：若文件本身有附解答說明則順帶簡短摘要，若無請填空字串即可。\n"
                         "5. 格式：嚴格以 JSON 陣列格式輸出，不要包含任何額外問候語。\n"
@@ -698,7 +700,8 @@ with tab_import:
                     response = None
                     for attempt in range(max_retries):
                         try:
-                            response = model.generate_content(gemini_content)
+                            # 🌟 設定 300 秒（5 分鐘）超時門檻，徹底防範 504 Deadline Exceeded
+                            response = model.generate_content(gemini_content, request_options={"timeout": 300})
                             break
                         except Exception as e:
                             if "429" in str(e) and attempt < max_retries - 1:
