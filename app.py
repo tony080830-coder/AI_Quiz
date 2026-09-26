@@ -7,8 +7,8 @@ import google.generativeai as genai
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 # 請將在 Turso 控制台複製的網址與 Token 貼在下方引號中
-TURSO_DB_URL = ""      # 例："libsql://quiz-db-yourname.turso.io"
-TURSO_AUTH_TOKEN = ""  # 你的 Turso 驗證 Token
+TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"      # 例："libsql://quiz-db-yourname.turso.io"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJDRUFwOHJsZ0VmR0R1MDdXRWFlUHR3Iiwib3JnX2lkIjoxMDAwMjU0OTEzfQ.Qa4_xPGT1uowZV9gdyj4hux4Kz5ESoQvIhEHbNoHI6ciad6h9dQrP-ekbJyrHJbjlWObzuhCMnCDiWP9CX6iBg"  # 你的 Turso 驗證 Token
 
 try:
     if TURSO_DB_URL and TURSO_AUTH_TOKEN:
