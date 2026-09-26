@@ -19,13 +19,17 @@ c.execute('''CREATE TABLE IF NOT EXISTS questions
               answer TEXT, wrong_count INTEGER DEFAULT 0)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
 
-# 自動檢查欄位相容性
+# 自動檢查並平滑補上新欄位
 c.execute("PRAGMA table_info(questions)")
 existing_cols = [col['name'] for col in c.fetchall()]
 if 'explanation' not in existing_cols:
     c.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
 if 'folder' not in existing_cols:
     c.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
+if 'is_starred' not in existing_cols:
+    c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
+if 'pdf_starred' not in existing_cols:
+    c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
 conn.commit()
 
 def get_api_key():
@@ -39,7 +43,7 @@ if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
 if 'explanation' not in st.session_state: st.session_state.explanation = ""
 
-def load_next_question(target_folder, target_pdf):
+def load_next_question(target_folder, target_pdf, only_starred=False):
     query = "SELECT * FROM questions WHERE 1=1"
     params = []
     if target_folder != "全部資料夾":
@@ -48,6 +52,9 @@ def load_next_question(target_folder, target_pdf):
     if target_pdf != "全部考卷":
         query += " AND category=?"
         params.append(target_pdf)
+    if only_starred:
+        query += " AND is_starred=1"
+        
     query += " ORDER BY wrong_count DESC"
     c.execute(query, params)
     all_q = c.fetchall()
@@ -73,7 +80,7 @@ def check_answer(selected, correct, q_id):
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
-tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與備份"])
+tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與管理"])
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
@@ -81,30 +88,72 @@ with tab_quiz:
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     if not folders:
-        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目，或到「設定與備份」還原題庫！")
+        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目，或到「設定與管理」還原題庫！")
     else:
+        # 星號考卷快篩與星號題目開關
+        col_star_opt1, col_star_opt2 = st.columns(2)
+        with col_star_opt1:
+            quiz_only_starred_pdf = st.checkbox("⭐ 僅顯示星號考卷", value=False, key="chk_starred_pdf")
+        with col_star_opt2:
+            quiz_only_starred_q = st.checkbox("⭐ 只練習星號收藏題目", value=False, key="chk_starred_q")
+        
         col_f, col_p = st.columns(2)
         with col_f:
             selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders, key="quiz_folder")
-        with col_p:
-            if selected_folder == "全部資料夾":
-                c.execute("SELECT DISTINCT category FROM questions")
-            else:
-                c.execute("SELECT DISTINCT category FROM questions WHERE folder=?", (selected_folder,))
-            pdfs = [row['category'] for row in c.fetchall() if row['category']]
-            selected_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + pdfs, key="quiz_pdf")
         
-        state_key = f"{selected_folder}_{selected_pdf}"
+        # 取得 PDF 清單及其星號標記狀態
+        pdf_query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
+        pdf_params = []
+        if selected_folder != "全部資料夾":
+            pdf_query += " AND folder=?"
+            pdf_params.append(selected_folder)
+        if quiz_only_starred_pdf:
+            pdf_query += " AND pdf_starred=1"
+            
+        c.execute(pdf_query, pdf_params)
+        pdf_rows = c.fetchall()
+        pdf_names = [row['category'] for row in pdf_rows if row['category']]
+        pdf_star_map = {row['category']: bool(row['pdf_starred']) for row in pdf_rows}
+        
+        with col_p:
+            selected_pdf = st.selectbox(
+                "📄 選擇 PDF 考卷：", 
+                ["全部考卷"] + pdf_names, 
+                key="quiz_pdf",
+                format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x
+            )
+        
+        state_key = f"{selected_folder}_{selected_pdf}_{quiz_only_starred_q}_{quiz_only_starred_pdf}"
         if 'last_selected' not in st.session_state or st.session_state.last_selected != state_key:
             st.session_state.last_selected = state_key
-            load_next_question(selected_folder, selected_pdf)
+            load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
             
         if st.session_state.current_q is None: 
-            load_next_question(selected_folder, selected_pdf)
+            load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
             
         q = st.session_state.current_q
-        if q:
-            st.caption(f"📂 {q['folder']} > 📄 {q['category']} | 歷史錯誤次數：{q['wrong_count']}")
+        if not q:
+            if quiz_only_starred_q:
+                st.info("此考卷/分類下目前沒有加星號的題目！可取消勾選星號題目進行全量練習。")
+            else:
+                st.info("查無題目，請切換分類或確認題庫。")
+        else:
+            # 題目卡片頭部 (含題目星號切換)
+            col_info, col_star_btn = st.columns([4, 1.2])
+            is_q_starred = bool(q['is_starred'])
+            with col_info:
+                st.caption(f"📂 {q['folder']} > 📄 {q['category']} | 歷史錯誤：{q['wrong_count']} 次")
+            with col_star_btn:
+                star_label = "⭐ 已收藏" if is_q_starred else "☆ 收藏"
+                if st.button(star_label, key=f"star_toggle_{q['id']}", use_container_width=True):
+                    new_star = 0 if is_q_starred else 1
+                    c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, q['id']))
+                    conn.commit()
+                    # 重新拉取目前題目，不打亂當前做題
+                    c.execute("SELECT * FROM questions WHERE id=?", (q['id'],))
+                    st.session_state.current_q = c.fetchone()
+                    st.rerun()
+            
             st.subheader(q['text'])
             options = [q['opt1'], q['opt2'], q['opt3'], q['opt4']]
             correct_ans = q['answer']
@@ -124,7 +173,7 @@ with tab_quiz:
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("👉 下一題", use_container_width=True, type="primary"):
-                        load_next_question(selected_folder, selected_pdf)
+                        load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
                         st.rerun()
                 with col2:
                     has_exp = bool(q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解')
@@ -163,16 +212,26 @@ with tab_review:
     if not folders:
         st.info("目前沒有題庫資料。")
     else:
-        col_f, col_p = st.columns(2)
+        col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
         with col_f:
             rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders, key="rev_folder")
         with col_p:
             if rev_folder == "全部資料夾":
-                c.execute("SELECT DISTINCT category FROM questions")
+                c.execute("SELECT DISTINCT category, pdf_starred FROM questions")
             else:
-                c.execute("SELECT DISTINCT category FROM questions WHERE folder=?", (rev_folder,))
-            rev_pdfs = [row['category'] for row in c.fetchall() if row['category']]
-            rev_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + rev_pdfs, key="rev_pdf")
+                c.execute("SELECT DISTINCT category, pdf_starred FROM questions WHERE folder=?", (rev_folder,))
+            rev_rows = c.fetchall()
+            rev_pdfs = [row['category'] for row in rev_rows if row['category']]
+            rev_star_map = {row['category']: bool(row['pdf_starred']) for row in rev_rows}
+            rev_pdf = st.selectbox(
+                "📄 選擇 PDF 考卷：", 
+                ["全部考卷"] + rev_pdfs, 
+                key="rev_pdf",
+                format_func=lambda x: f"⭐ {x}" if rev_star_map.get(x) else x
+            )
+        with col_st:
+            st.write("")
+            rev_only_starred = st.checkbox("⭐ 僅看星號題目", value=False, key="rev_only_star")
             
         query = "SELECT * FROM questions WHERE 1=1"
         params = []
@@ -182,6 +241,8 @@ with tab_review:
         if rev_pdf != "全部考卷":
             query += " AND category=?"
             params.append(rev_pdf)
+        if rev_only_starred:
+            query += " AND is_starred=1"
             
         c.execute(query, params)
         questions_to_show = c.fetchall()
@@ -192,7 +253,9 @@ with tab_review:
             st.write(f"共找到 **{len(questions_to_show)}** 題：")
             st.divider()
             for idx, q in enumerate(questions_to_show):
-                with st.expander(f"題目 {idx+1}: {q['text'][:35]}... (錯 {q['wrong_count']} 次)"):
+                is_st = bool(q['is_starred'])
+                star_tag = "⭐ " if is_st else ""
+                with st.expander(f"{star_tag}題目 {idx+1}: {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                     st.markdown(f"**【題目】** {q['text']}")
                     st.markdown(f"- (A) {q['opt1']}")
                     st.markdown(f"- (B) {q['opt2']}")
@@ -201,6 +264,7 @@ with tab_review:
                     st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                     exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解"
                     st.markdown(f"💡 **解析**：{exp_text}")
+                    st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
 # ---------- 【匯入區】 ----------
 with tab_import:
@@ -247,23 +311,22 @@ with tab_import:
                     final_name = custom_pdf_name.strip() if custom_pdf_name else uploaded_pdf.name
                     
                     for nq in new_questions:
-                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation) VALUES (?,?,?,?,?,?,?,?,?)",
+                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,0,0)",
                                   (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
                     conn.commit()
                     st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！")
-                    st.info("💡 提示：匯入完成後，建議到「⚙️ 設定與備份」點擊下載備份檔，存至 Google 雲端！")
+                    st.info("💡 提示：匯入完成後，建議到「⚙️ 設定與管理」點擊下載備份檔存至雲端！")
                     st.session_state.current_q = None
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
 
-# ---------- 【設定與備份區】 ----------
+# ---------- 【設定與管理區】 ----------
 with tab_settings:
     st.subheader("💾 題庫備份與還原 (防重啟遺失)")
-    st.caption("匯入新考卷後，點擊下方按鈕將檔案存入 iPad 或 Google 雲端硬碟；伺服器重啟時一鍵還原！")
+    st.caption("匯入新考卷後，點擊下載備份檔儲存；若伺服器重啟題庫清空，隨時上傳還原。")
     
     col_dl, col_ul = st.columns(2)
     with col_dl:
-        # 讀取本地資料庫提供下載
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "rb") as fp:
                 st.download_button(
@@ -292,8 +355,8 @@ with tab_settings:
         st.success("設定已儲存！")
 
     st.divider()
-    st.subheader("📁 題庫與資料夾管理")
-    c.execute("SELECT DISTINCT folder, category FROM questions")
+    st.subheader("📁 題庫管理 (名稱修改 / 移動 / 星號標記 / 刪除)")
+    c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
     items = c.fetchall()
     
     if not items:
@@ -305,12 +368,15 @@ with tab_settings:
         for index, row in enumerate(items):
             f_name = row['folder']
             p_name = row['category']
-            with st.expander(f"📂 {f_name} ＞ 📄 {p_name}"):
+            is_pdf_st = bool(row['pdf_starred'])
+            
+            exp_title = f"{'⭐ ' if is_pdf_st else ''}📂 {f_name} ＞ 📄 {p_name}"
+            with st.expander(exp_title):
                 new_p_name = st.text_input("修改 PDF 名稱", value=p_name, key=f"p_rename_{index}")
                 target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
                 
-                col_save, col_del = st.columns(2)
-                if col_save.button("💾 儲存變更", key=f"save_{index}"):
+                col_save, col_star_pdf, col_del = st.columns(3)
+                if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
                     c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", 
                               (new_p_name, target_f, f_name, p_name))
                     conn.commit()
@@ -318,7 +384,15 @@ with tab_settings:
                     time.sleep(0.5)
                     st.rerun()
                     
-                if col_del.button("🗑️ 刪除此考卷", key=f"del_{index}"):
+                star_btn_txt = "⭐ 取消考卷星號" if is_pdf_st else "☆ 標記為星號考卷"
+                if col_star_pdf.button(star_btn_txt, key=f"star_pdf_{index}", use_container_width=True):
+                    new_p_star = 0 if is_pdf_st else 1
+                    c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", 
+                              (new_p_star, f_name, p_name))
+                    conn.commit()
+                    st.rerun()
+                    
+                if col_del.button("🗑️ 刪除考卷", key=f"del_{index}", use_container_width=True):
                     c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
                     conn.commit()
                     st.success("✅ 已刪除！")
