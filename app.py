@@ -19,6 +19,14 @@ c.execute('''CREATE TABLE IF NOT EXISTS questions
               answer TEXT, wrong_count INTEGER DEFAULT 0)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
 
+# 建立測驗歷史記錄表 (記錄每一次做完某份 PDF 的對錯清單)
+c.execute('''CREATE TABLE IF NOT EXISTS exam_history
+             (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+              category TEXT, 
+              wrong_ids TEXT, 
+              correct_ids TEXT, 
+              timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
 # 自動檢查並平滑補上新欄位
 c.execute("PRAGMA table_info(questions)")
 existing_cols = [col['name'] for col in c.fetchall()]
@@ -37,13 +45,22 @@ def get_api_key():
     result = c.fetchone()
     return result['value'] if result else ""
 
-# ================= 2. 狀態管理 =================
+# ================= 2. 狀態管理 (隨機練習與循序測驗) =================
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
 if 'explanation' not in st.session_state: st.session_state.explanation = ""
 
-def load_next_question(target_folder, target_pdf, only_starred=False):
+# 模擬測驗專用狀態
+if 'exam_active' not in st.session_state: st.session_state.exam_active = False
+if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
+if 'exam_questions' not in st.session_state: st.session_state.exam_questions = []
+if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
+if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = []
+if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
+if 'exam_last_pdf' not in st.session_state: st.session_state.exam_last_pdf = ""
+
+def load_next_random_question(target_folder, target_pdf, only_starred=False):
     query = "SELECT * FROM questions WHERE 1=1"
     params = []
     if target_folder != "全部資料夾":
@@ -88,28 +105,21 @@ with tab_quiz:
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     if not folders:
-        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目，或到「設定與管理」還原題庫！")
+        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
     else:
-        # 星號考卷快篩與星號題目開關
-        col_star_opt1, col_star_opt2 = st.columns(2)
-        with col_star_opt1:
-            quiz_only_starred_pdf = st.checkbox("⭐ 僅顯示星號考卷", value=False, key="chk_starred_pdf")
-        with col_star_opt2:
-            quiz_only_starred_q = st.checkbox("⭐ 只練習星號收藏題目", value=False, key="chk_starred_q")
-        
+        # 模式切換：循序模擬測驗 vs 自由隨機刷題
+        quiz_mode = st.radio("選擇練習模式：", ["📝 整份考卷模擬測驗 (做完比對上次錯題)", "🎲 自由隨機抽題練習"], horizontal=True)
+        st.divider()
+
         col_f, col_p = st.columns(2)
         with col_f:
             selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders, key="quiz_folder")
         
-        # 取得 PDF 清單及其星號標記狀態
         pdf_query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
         pdf_params = []
         if selected_folder != "全部資料夾":
             pdf_query += " AND folder=?"
             pdf_params.append(selected_folder)
-        if quiz_only_starred_pdf:
-            pdf_query += " AND pdf_starred=1"
-            
         c.execute(pdf_query, pdf_params)
         pdf_rows = c.fetchall()
         pdf_names = [row['category'] for row in pdf_rows if row['category']]
@@ -122,86 +132,279 @@ with tab_quiz:
                 key="quiz_pdf",
                 format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x
             )
-        
-        state_key = f"{selected_folder}_{selected_pdf}_{quiz_only_starred_q}_{quiz_only_starred_pdf}"
-        if 'last_selected' not in st.session_state or st.session_state.last_selected != state_key:
-            st.session_state.last_selected = state_key
-            load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
-            
-        if st.session_state.current_q is None: 
-            load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
-            
-        q = st.session_state.current_q
-        if not q:
-            if quiz_only_starred_q:
-                st.info("此考卷/分類下目前沒有加星號的題目！可取消勾選星號題目進行全量練習。")
+
+        # ---------------- 模式 A：整份考卷模擬測驗 ----------------
+        if quiz_mode == "📝 整份考卷模擬測驗 (做完比對上次錯題)":
+            if selected_pdf == "全部考卷":
+                st.info("💡 請在上方「選擇 PDF 考卷」挑選一份特定的考卷，以進行整份測驗與前後次比對！")
             else:
-                st.info("查無題目，請切換分類或確認題庫。")
-        else:
-            # 題目卡片頭部 (含題目星號切換)
-            col_info, col_star_btn = st.columns([4, 1.2])
-            is_q_starred = bool(q['is_starred'])
-            with col_info:
-                st.caption(f"📂 {q['folder']} > 📄 {q['category']} | 歷史錯誤：{q['wrong_count']} 次")
-            with col_star_btn:
-                star_label = "⭐ 已收藏" if is_q_starred else "☆ 收藏"
-                if st.button(star_label, key=f"star_toggle_{q['id']}", use_container_width=True):
-                    new_star = 0 if is_q_starred else 1
-                    c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, q['id']))
-                    conn.commit()
-                    # 重新拉取目前題目，不打亂當前做題
-                    c.execute("SELECT * FROM questions WHERE id=?", (q['id'],))
-                    st.session_state.current_q = c.fetchone()
-                    st.rerun()
-            
-            st.subheader(q['text'])
-            options = [q['opt1'], q['opt2'], q['opt3'], q['opt4']]
-            correct_ans = q['answer']
-            q_id = q['id']
-            
-            if not st.session_state.answered:
-                for opt in options:
-                    if st.button(opt, use_container_width=True):
-                        check_answer(opt, correct_ans, q_id)
+                # 換了 PDF 考卷時自動重置測驗狀態
+                if st.session_state.exam_last_pdf != selected_pdf:
+                    st.session_state.exam_last_pdf = selected_pdf
+                    st.session_state.exam_active = False
+                    st.session_state.exam_finished = False
+
+                # 階段 1：準備開始
+                if not st.session_state.exam_active and not st.session_state.exam_finished:
+                    c.execute("SELECT COUNT(*) as count FROM questions WHERE category=?", (selected_pdf,))
+                    total_count = c.fetchone()['count']
+                    st.markdown(f"#### 📄 考卷：`{selected_pdf}`")
+                    st.write(f"本份考卷共 **{total_count}** 題選擇題。測驗結束後將自動與你**上一次**的作答成果進行比對！")
+                    if st.button("🚀 開始測驗", type="primary", use_container_width=True):
+                        c.execute("SELECT * FROM questions WHERE category=? ORDER BY id ASC", (selected_pdf,))
+                        st.session_state.exam_questions = c.fetchall()
+                        st.session_state.exam_index = 0
+                        st.session_state.exam_wrong_ids = []
+                        st.session_state.exam_correct_ids = []
+                        st.session_state.exam_active = True
+                        st.session_state.exam_finished = False
+                        st.session_state.answered = False
+                        st.session_state.explanation = ""
                         st.rerun()
-            else:
-                if st.session_state.is_correct:
-                    st.success("✅ 答對了！")
-                else:
-                    st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("👉 下一題", use_container_width=True, type="primary"):
-                        load_next_question(selected_folder, selected_pdf, quiz_only_starred_q)
-                        st.rerun()
-                with col2:
-                    has_exp = bool(q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解')
-                    btn_label = "📖 查看詳解" if has_exp else "🧠 AI 即時補寫詳解"
-                    btn_type = "secondary" if has_exp else "primary"
+
+                # 階段 2：測驗進行中
+                elif st.session_state.exam_active and not st.session_state.exam_finished:
+                    total_q = len(st.session_state.exam_questions)
+                    idx = st.session_state.exam_index
+                    curr_q = st.session_state.exam_questions[idx]
                     
-                    if not st.session_state.is_correct and st.button(btn_label, use_container_width=True, type=btn_type):
-                        if has_exp:
-                            st.session_state.explanation = q['explanation']
+                    st.progress((idx) / total_q)
+                    st.caption(f"進度：第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']}")
+                    
+                    # 收藏星號功能
+                    col_t, col_s = st.columns([4, 1.2])
+                    is_q_st = bool(curr_q['is_starred'])
+                    with col_t:
+                        st.subheader(curr_q['text'])
+                    with col_s:
+                        if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"exam_star_{curr_q['id']}", use_container_width=True):
+                            new_star = 0 if is_q_st else 1
+                            c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, curr_q['id']))
+                            conn.commit()
+                            c.execute("SELECT * FROM questions WHERE category=? ORDER BY id ASC", (selected_pdf,))
+                            st.session_state.exam_questions = c.fetchall()
+                            st.rerun()
+
+                    options = [curr_q['opt1'], curr_q['opt2'], curr_q['opt3'], curr_q['opt4']]
+                    correct_ans = curr_q['answer']
+                    q_id = curr_q['id']
+
+                    if not st.session_state.answered:
+                        for opt in options:
+                            if st.button(opt, key=f"exam_opt_{opt}", use_container_width=True):
+                                check_answer(opt, correct_ans, q_id)
+                                if st.session_state.is_correct:
+                                    if q_id not in st.session_state.exam_correct_ids:
+                                        st.session_state.exam_correct_ids.append(q_id)
+                                else:
+                                    if q_id not in st.session_state.exam_wrong_ids:
+                                        st.session_state.exam_wrong_ids.append(q_id)
+                                st.rerun()
+                    else:
+                        if st.session_state.is_correct:
+                            st.success("✅ 答對了！")
                         else:
-                            api_key = get_api_key()
-                            if not api_key: st.error("請先到設定頁面輸入 API Key！")
-                            else:
-                                with st.spinner("AI 正在為這題撰寫詳解..."):
-                                    try:
-                                        genai.configure(api_key=api_key)
-                                        model = genai.GenerativeModel('gemini-3.8-flash')
-                                        prompt = f"題目：{q['text']}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
-                                        response = model.generate_content(prompt)
-                                        c.execute("UPDATE questions SET explanation=? WHERE id=?", (response.text, q_id))
-                                        conn.commit()
-                                        st.session_state.explanation = response.text
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"呼叫 AI 失敗：{e}")
+                            st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
+
+                        col_next, col_exp = st.columns(2)
+                        with col_next:
+                            is_last = (idx + 1 >= total_q)
+                            btn_text = "🏁 結束測驗並看分析報告" if is_last else "👉 下一題"
+                            if st.button(btn_text, type="primary", use_container_width=True):
+                                if is_last:
+                                    # 寫入本次測驗結果到 exam_history
+                                    c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                              (selected_pdf, json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                                    conn.commit()
+                                    st.session_state.exam_active = False
+                                    st.session_state.exam_finished = True
+                                else:
+                                    st.session_state.exam_index += 1
+                                    st.session_state.answered = False
+                                    st.session_state.explanation = ""
+                                st.rerun()
+
+                        with col_exp:
+                            has_exp = bool(curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解')
+                            if not st.session_state.is_correct and st.button("📖 查看詳解" if has_exp else "🧠 AI 即時補寫詳解", key=f"exp_{q_id}", use_container_width=True):
+                                if has_exp:
+                                    st.session_state.explanation = curr_q['explanation']
+                                else:
+                                    api_key = get_api_key()
+                                    if not api_key: st.error("請先設定 API Key！")
+                                    else:
+                                        with st.spinner("AI 正在為這題撰寫詳解..."):
+                                            try:
+                                                genai.configure(api_key=api_key)
+                                                model = genai.GenerativeModel('gemini-3.8-flash')
+                                                prompt = f"題目：{curr_q['text']}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
+                                                resp = model.generate_content(prompt)
+                                                c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text, q_id))
+                                                conn.commit()
+                                                st.session_state.explanation = resp.text
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"呼叫 AI 失敗：{e}")
+
+                        if st.session_state.explanation:
+                            st.info(st.session_state.explanation)
+
+                # 階段 3：測驗完成與兩次歷史比對報告
+                elif st.session_state.exam_finished:
+                    st.balloons()
+                    st.success(f"🎉 考卷「{selected_pdf}」測驗完成！")
+                    
+                    # 撈取該 PDF 最近兩次的測驗紀錄
+                    c.execute("SELECT * FROM exam_history WHERE category=? ORDER BY id DESC LIMIT 2", (selected_pdf,))
+                    history_records = c.fetchall()
+                    
+                    curr_record = history_records[0]
+                    curr_wrong = set(json.loads(curr_record['wrong_ids']))
+                    curr_correct = set(json.loads(curr_record['correct_ids']))
+                    total_tested = len(curr_wrong) + len(curr_correct)
+                    curr_score = (len(curr_correct) / total_tested * 100) if total_tested > 0 else 0
+
+                    if len(history_records) < 2:
+                        # 第一次做
+                        st.info("💡 這是你第一次做這份 PDF 考卷！已將本次結果存檔。下次再做同一份 PDF 時，系統將自動為你比對哪些題目進步或持續答錯！")
+                        st.metric("本次得分率", f"{curr_score:.1f}%", f"錯 {len(curr_wrong)} 題 / 對 {len(curr_correct)} 題")
+                    else:
+                        # 存在上次紀錄，開始交叉比對！
+                        prev_record = history_records[1]
+                        prev_wrong = set(json.loads(prev_record['wrong_ids']))
+                        prev_correct = set(json.loads(prev_record['correct_ids']))
+                        prev_tested = len(prev_wrong) + len(prev_correct)
+                        prev_score = (len(prev_correct) / prev_tested * 100) if prev_tested > 0 else 0
                         
-                if st.session_state.explanation:
-                    st.info(st.session_state.explanation)
+                        score_diff = curr_score - prev_score
+                        
+                        # 核心四分類集合運算
+                        persistent_wrong = curr_wrong.intersection(prev_wrong) # 兩次都錯
+                        new_wrong = curr_wrong.intersection(prev_correct)      # 上次對這次錯 (退步)
+                        improved = prev_wrong.intersection(curr_correct)       # 上次錯這次對 (進步)
+                        always_correct = curr_correct.intersection(prev_correct)
+
+                        # 數據指標卡片
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("本次得分率", f"{curr_score:.1f}%", f"{score_diff:+.1f}%")
+                        c2.metric("🔴 兩次皆錯", f"{len(persistent_wrong)} 題")
+                        c3.metric("⚠️ 新增錯題", f"{len(new_wrong)} 題")
+                        c4.metric("🟢 成功訂正", f"{len(improved)} 題")
+                        
+                        st.divider()
+
+                        # 快速收藏頑固錯題按鈕
+                        if persistent_wrong:
+                            if st.button("⭐ 一鍵將「兩次皆錯」的題目全部加入星號收藏", type="primary"):
+                                q_placeholders = ','.join(['?'] * len(persistent_wrong))
+                                c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({q_placeholders})", list(persistent_wrong))
+                                conn.commit()
+                                st.toast("✅ 已將頑固錯題全部標記為星號！")
+                                time.sleep(0.5)
+                                st.rerun()
+
+                        # 展開展示比對清單
+                        def show_q_group(title, id_set, alert_type="error"):
+                            if id_set:
+                                with st.expander(f"{title} (共 {len(id_set)} 題)", expanded=True):
+                                    for qid in id_set:
+                                        c.execute("SELECT * FROM questions WHERE id=?", (qid,))
+                                        q_data = c.fetchone()
+                                        if q_data:
+                                            st.markdown(f"**【題目】** {q_data['text']}")
+                                            st.markdown(f"- 正確答案：`{q_data['answer']}`")
+                                            exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
+                                            st.caption(f"💡 解析：{exp}")
+                                            st.divider()
+
+                        show_q_group("🔴 頑固錯題（上次錯、這次又錯）", persistent_wrong)
+                        show_q_group("⚠️ 新增錯題（上次答對、這次粗心答錯）", new_wrong)
+                        show_q_group("🟢 成功訂正（上次答錯、這次順利答對）", improved)
+
+                    if st.button("🔄 重新測驗這份考卷", use_container_width=True):
+                        st.session_state.exam_active = False
+                        st.session_state.exam_finished = False
+                        st.rerun()
+
+        # ---------------- 模式 B：自由隨機抽題練習 ----------------
+        else:
+            col_star_opt1, col_star_opt2 = st.columns(2)
+            with col_star_opt1:
+                quiz_only_starred_pdf = st.checkbox("⭐ 僅選星號考卷", value=False, key="chk_starred_pdf")
+            with col_star_opt2:
+                quiz_only_starred_q = st.checkbox("⭐ 只練習星號收藏題目", value=False, key="chk_starred_q")
+            
+            state_key = f"{selected_folder}_{selected_pdf}_{quiz_only_starred_q}_{quiz_only_starred_pdf}"
+            if 'last_selected' not in st.session_state or st.session_state.last_selected != state_key:
+                st.session_state.last_selected = state_key
+                load_next_random_question(selected_folder, selected_pdf, quiz_only_starred_q)
+                
+            if st.session_state.current_q is None: 
+                load_next_random_question(selected_folder, selected_pdf, quiz_only_starred_q)
+                
+            q = st.session_state.current_q
+            if not q:
+                st.info("此條件下查無題目，請切換設定。")
+            else:
+                col_info, col_star_btn = st.columns([4, 1.2])
+                is_q_starred = bool(q['is_starred'])
+                with col_info:
+                    st.caption(f"📂 {q['folder']} > 📄 {q['category']} | 歷史錯誤：{q['wrong_count']} 次")
+                with col_star_btn:
+                    star_label = "⭐ 已收藏" if is_q_starred else "☆ 收藏"
+                    if st.button(star_label, key=f"star_toggle_{q['id']}", use_container_width=True):
+                        new_star = 0 if is_q_starred else 1
+                        c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, q['id']))
+                        conn.commit()
+                        c.execute("SELECT * FROM questions WHERE id=?", (q['id'],))
+                        st.session_state.current_q = c.fetchone()
+                        st.rerun()
+                
+                st.subheader(q['text'])
+                options = [q['opt1'], q['opt2'], q['opt3'], q['opt4']]
+                correct_ans = q['answer']
+                q_id = q['id']
+                
+                if not st.session_state.answered:
+                    for opt in options:
+                        if st.button(opt, key=f"rnd_opt_{opt}", use_container_width=True):
+                            check_answer(opt, correct_ans, q_id)
+                            st.rerun()
+                else:
+                    if st.session_state.is_correct:
+                        st.success("✅ 答對了！")
+                    else:
+                        st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("👉 下一題", use_container_width=True, type="primary"):
+                            load_next_random_question(selected_folder, selected_pdf, quiz_only_starred_q)
+                            st.rerun()
+                    with col2:
+                        has_exp = bool(q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解')
+                        if not st.session_state.is_correct and st.button("📖 查看詳解" if has_exp else "🧠 AI 即時補寫詳解", key=f"rnd_exp_{q_id}", use_container_width=True):
+                            if has_exp:
+                                st.session_state.explanation = q['explanation']
+                            else:
+                                api_key = get_api_key()
+                                if not api_key: st.error("請先設定 API Key！")
+                                else:
+                                    with st.spinner("AI 正在為這題撰寫詳解..."):
+                                        try:
+                                            genai.configure(api_key=api_key)
+                                            model = genai.GenerativeModel('gemini-3.8-flash')
+                                            prompt = f"題目：{q['text']}\n選項：{options}\n正解：{correct_ans}\n請詳細解釋這題觀念，告訴我為什麼錯。"
+                                            resp = model.generate_content(prompt)
+                                            c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text, q_id))
+                                            conn.commit()
+                                            st.session_state.explanation = resp.text
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"呼叫 AI 失敗：{e}")
+                            
+                    if st.session_state.explanation:
+                        st.info(st.session_state.explanation)
 
 # ---------- 【錯題總覽區】 ----------
 with tab_review:
@@ -315,7 +518,6 @@ with tab_import:
                                   (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
                     conn.commit()
                     st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！")
-                    st.info("💡 提示：匯入完成後，建議到「⚙️ 設定與管理」點擊下載備份檔存至雲端！")
                     st.session_state.current_q = None
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
@@ -323,7 +525,7 @@ with tab_import:
 # ---------- 【設定與管理區】 ----------
 with tab_settings:
     st.subheader("💾 題庫備份與還原 (防重啟遺失)")
-    st.caption("匯入新考卷後，點擊下載備份檔儲存；若伺服器重啟題庫清空，隨時上傳還原。")
+    st.caption("匯入新考卷或測驗後，點擊下載備份檔；伺服器重啟時上傳還原即可保有所有測驗記錄。")
     
     col_dl, col_ul = st.columns(2)
     with col_dl:
@@ -379,6 +581,7 @@ with tab_settings:
                 if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
                     c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", 
                               (new_p_name, target_f, f_name, p_name))
+                    c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
                     conn.commit()
                     st.success("✅ 更新成功！")
                     time.sleep(0.5)
@@ -394,6 +597,7 @@ with tab_settings:
                     
                 if col_del.button("🗑️ 刪除考卷", key=f"del_{index}", use_container_width=True):
                     c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
+                    c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
                     conn.commit()
                     st.success("✅ 已刪除！")
                     time.sleep(0.5)
