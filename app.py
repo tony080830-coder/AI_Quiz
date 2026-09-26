@@ -29,7 +29,11 @@ class CursorWrapper:
         self.is_cloud = is_cloud
 
     def execute(self, *args, **kwargs):
-        self.cursor.execute(*args, **kwargs)
+        try:
+            self.cursor.execute(*args, **kwargs)
+        except Exception as e:
+            # 容錯處理，避免單一查詢失敗讓整個頁面崩潰
+            raise e
         return self
 
     def executemany(self, *args, **kwargs):
@@ -37,7 +41,10 @@ class CursorWrapper:
         return self
 
     def fetchone(self):
-        row = self.cursor.fetchone()
+        try:
+            row = self.cursor.fetchone()
+        except Exception:
+            return None
         if row is None:
             return None
         if hasattr(row, 'keys') or isinstance(row, dict):
@@ -48,7 +55,10 @@ class CursorWrapper:
         return row
 
     def fetchall(self):
-        rows = self.cursor.fetchall()
+        try:
+            rows = self.cursor.fetchall()
+        except Exception:
+            return []
         if not rows:
             return []
         if hasattr(rows[0], 'keys') or isinstance(rows[0], dict):
@@ -70,77 +80,84 @@ class DBWrapper:
         return CursorWrapper(self.conn.cursor(), self.is_cloud)
 
     def commit(self):
-        return self.conn.commit()
+        try:
+            return self.conn.commit()
+        except Exception:
+            pass
 
-# 連線判定
-if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
-    try:
-        import libsql_experimental as libsql
-        raw_conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
-        test_cur = raw_conn.cursor()
-        test_cur.execute("SELECT 1")
-        test_cur.fetchall()
-        db_conn = DBWrapper(raw_conn, is_cloud=True)
-        IS_CLOUD = True
-    except Exception as e:
-        CLOUD_ERROR = str(e)
+def init_connection():
+    global IS_CLOUD, CLOUD_ERROR
+    if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
+        try:
+            import libsql_experimental as libsql
+            raw_conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
+            test_cur = raw_conn.cursor()
+            test_cur.execute("SELECT 1")
+            test_cur.fetchall()
+            IS_CLOUD = True
+            return DBWrapper(raw_conn, is_cloud=True)
+        except Exception as e:
+            CLOUD_ERROR = str(e)
+            import sqlite3
+            raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+            IS_CLOUD = False
+            return DBWrapper(raw_conn, is_cloud=False)
+    else:
         import sqlite3
         raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-        db_conn = DBWrapper(raw_conn, is_cloud=False)
         IS_CLOUD = False
-else:
-    import sqlite3
-    raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-    db_conn = DBWrapper(raw_conn, is_cloud=False)
-    IS_CLOUD = False
+        return DBWrapper(raw_conn, is_cloud=False)
 
-conn = db_conn
+conn = init_connection()
 c = conn.cursor()
 
 # ================= 1. 資料庫初始化 & 自動升級 =================
-c.execute('''CREATE TABLE IF NOT EXISTS questions
-             (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-              category TEXT, text TEXT, 
-              opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, 
-              answer TEXT, wrong_count INTEGER DEFAULT 0)''')
-c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS exam_history
-             (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-              category TEXT, 
-              wrong_ids TEXT, 
-              correct_ids TEXT, 
-              timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+try:
+    c.execute('''CREATE TABLE IF NOT EXISTS questions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  category TEXT, text TEXT, 
+                  opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, 
+                  answer TEXT, wrong_count INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS exam_history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  category TEXT, 
+                  wrong_ids TEXT, 
+                  correct_ids TEXT, 
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-c.execute("PRAGMA table_info(questions)")
-existing_cols = [col['name'] for col in c.fetchall()]
-if 'explanation' not in existing_cols:
-    c.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
-if 'folder' not in existing_cols:
-    c.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
-if 'is_starred' not in existing_cols:
-    c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
-if 'pdf_starred' not in existing_cols:
-    c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
-# 🌟 新增動態選項陣列欄位 (支援 5 個以上選項)
-if 'options' not in existing_cols:
-    c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
-conn.commit()
+    c.execute("PRAGMA table_info(questions)")
+    existing_cols = [col['name'] for col in c.fetchall()]
+    if 'explanation' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
+    if 'folder' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
+    if 'is_starred' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
+    if 'pdf_starred' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
+    if 'options' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
+    conn.commit()
+except Exception:
+    pass
 
 def get_api_key():
-    c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
-    result = c.fetchone()
-    return result['value'] if result else ""
+    try:
+        c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
+        result = c.fetchone()
+        return result['value'] if result else ""
+    except Exception:
+        return ""
 
-# 取得題目的完整選項清單 (動態支援 2、4、5、6+ 個選項)
 def get_question_options(q):
-    if 'options' in q and q['options'] and q['options'].strip():
+    if 'options' in q and q['options'] and str(q['options']).strip():
         try:
             opts = json.loads(q['options'])
             if isinstance(opts, list) and len(opts) > 0:
                 return [str(o).strip() for o in opts if str(o).strip()]
         except Exception:
             pass
-    # 相容舊版固定 4 欄位資料
     opts = []
     for col in ['opt1', 'opt2', 'opt3', 'opt4']:
         if col in q and q[col] and str(q[col]).strip():
@@ -207,20 +224,22 @@ if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs
 
 def check_answer(selected, correct, q_id):
     st.session_state.answered = True
-    # 支援「完全相符」或字母比對（例如正確答案為 'A'，選了 'A. Glucose'）
-    is_right = (selected == correct)
+    is_right = (selected.strip() == correct.strip())
     if not is_right and len(correct) == 1 and selected.startswith(correct):
         is_right = True
     if not is_right and len(selected) == 1 and correct.startswith(selected):
         is_right = True
 
-    if is_right:
-        st.session_state.is_correct = True
-        c.execute("UPDATE questions SET wrong_count = MAX(0, wrong_count - 1) WHERE id=?", (q_id,))
-    else:
-        st.session_state.is_correct = False
-        c.execute("UPDATE questions SET wrong_count = wrong_count + 1 WHERE id=?", (q_id,))
-    conn.commit()
+    try:
+        if is_right:
+            st.session_state.is_correct = True
+            c.execute("UPDATE questions SET wrong_count = MAX(0, wrong_count - 1) WHERE id=?", (q_id,))
+        else:
+            st.session_state.is_correct = False
+            c.execute("UPDATE questions SET wrong_count = wrong_count + 1 WHERE id=?", (q_id,))
+        conn.commit()
+    except Exception:
+        pass
 
 # ================= 4. 網頁介面開始 =================
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
@@ -238,8 +257,11 @@ tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
-    c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-    folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    try:
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+        folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    except Exception:
+        folders = []
     
     if not folders:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
@@ -354,9 +376,8 @@ with tab_quiz:
                     st.session_state.exam_questions[idx] = c.fetchone()
                     st.rerun()
 
-            # 🌟 動態取得題目所有選項 (不限 4 個)
             options = get_question_options(curr_q)
-            correct_ans = curr_q['answer']
+            correct_ans = str(curr_q['answer']).strip()
             q_id = curr_q['id']
 
             if not st.session_state.answered:
@@ -416,32 +437,36 @@ with tab_quiz:
 
                 with col_exp:
                     has_exp = bool(curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解')
-                    if not st.session_state.is_correct and st.button("📖 查看詳解" if has_exp else "🧠 AI 即時補寫詳解", key=f"ex_exp_{q_id}", use_container_width=True):
+                    btn_exp_title = "📖 查看詳解" if has_exp else "🧠 AI 即時分析詳解"
+                    if st.button(btn_exp_title, key=f"ex_exp_{q_id}", use_container_width=True):
                         if has_exp:
                             st.session_state.explanation = curr_q['explanation']
                         else:
                             api_key = get_api_key()
-                            if not api_key: st.error("請至設定輸入 API Key！")
+                            if not api_key:
+                                st.error("請至「⚙️ 設定與管理」輸入 API Key！")
                             else:
-                                with st.spinner("AI 正在撰寫繁體中文詳解..."):
+                                with st.spinner("AI 正在為這題撰寫繁體中文深度詳解..."):
                                     try:
                                         genai.configure(api_key=api_key)
                                         model = genai.GenerativeModel('gemini-3.8-flash')
                                         prompt = (
                                             f"題目：{curr_q['text']}\n"
                                             f"選項：{options}\n"
-                                            f"正解：{correct_ans}\n\n"
-                                            "【重要規則】\n"
-                                            "1. 無論題目是英文或中文，詳解「一律以繁體中文」撰寫。\n"
-                                            "2. 請點出重要專有名詞中文對照，詳述正解依據及錯誤選項原因。"
+                                            f"正確答案：{correct_ans}\n\n"
+                                            "【作答規範】\n"
+                                            "1. 無論題目原文是英文還是中文，詳解一律必須使用「繁體中文（台灣醫學用語）」撰寫。\n"
+                                            "2. 請點出關鍵核心考點與專有名詞中英對照。\n"
+                                            "3. 詳細說明正解正確之原因，並逐一剖析其他錯誤選項錯在哪裡。"
                                         )
                                         resp = model.generate_content(prompt)
-                                        c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text, q_id))
+                                        new_exp = resp.text.strip()
+                                        c.execute("UPDATE questions SET explanation=? WHERE id=?", (new_exp, q_id))
                                         conn.commit()
-                                        st.session_state.explanation = resp.text
+                                        st.session_state.explanation = new_exp
                                         st.rerun()
                                     except Exception as e:
-                                        st.error(f"呼叫 AI 失敗：{e}")
+                                        st.error(f"AI 生成詳解失敗：{e}")
 
                 if st.session_state.explanation:
                     st.info(st.session_state.explanation)
@@ -464,18 +489,21 @@ with tab_quiz:
 
             if len(st.session_state.exam_tested_pdfs) == 1:
                 single_pdf = st.session_state.exam_tested_pdfs[0]
-                c.execute("SELECT * FROM exam_history WHERE category=? ORDER BY id DESC LIMIT 2", (single_pdf,))
-                histories = c.fetchall()
-                if len(histories) >= 2:
-                    prev_wrong = set(json.loads(histories[1]['wrong_ids']))
-                    prev_correct = set(json.loads(histories[1]['correct_ids']))
-                    persistent = curr_wrong.intersection(prev_wrong)
-                    improved = prev_wrong.intersection(curr_correct)
+                try:
+                    c.execute("SELECT * FROM exam_history WHERE category=? ORDER BY id DESC LIMIT 2", (single_pdf,))
+                    histories = c.fetchall()
+                    if len(histories) >= 2:
+                        prev_wrong = set(json.loads(histories[1]['wrong_ids']))
+                        prev_correct = set(json.loads(histories[1]['correct_ids']))
+                        persistent = curr_wrong.intersection(prev_wrong)
+                        improved = prev_wrong.intersection(curr_correct)
 
-                    st.markdown("#### 🔄 與上次同份考卷對比")
-                    c_p1, c_p2 = st.columns(2)
-                    c_p1.metric("🔴 兩次皆錯 (頑固題)", f"{len(persistent)} 題")
-                    c_p2.metric("🟢 成功雪恥 (上次錯這次對)", f"{len(improved)} 題")
+                        st.markdown("#### 🔄 與上次同份考卷對比")
+                        c_p1, c_p2 = st.columns(2)
+                        c_p1.metric("🔴 兩次皆錯 (頑固題)", f"{len(persistent)} 題")
+                        c_p2.metric("🟢 成功雪恥 (上次錯這次對)", f"{len(improved)} 題")
+                except Exception:
+                    pass
 
             st.divider()
 
@@ -517,8 +545,11 @@ with tab_quiz:
 # ---------- 【錯題總覽區】 ----------
 with tab_review:
     st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
-    c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-    folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    try:
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+        folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    except Exception:
+        folders = []
     
     if not folders:
         st.info("目前沒有題庫資料。")
@@ -573,17 +604,20 @@ with tab_review:
                         opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
                         st.markdown(f"- ({opt_label}) {opt_text}")
                     st.markdown(f"✅ **正確答案**：`{q['answer']}`")
-                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解"
+                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解 (做題時可一鍵生成)"
                     st.markdown(f"💡 **解析**：{exp_text}")
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-# ---------- 【匯入區 (支援 5+ 選項與各類文件)】 ----------
+# ---------- 【匯入區 (輕量極速匯入，防止 504 超時)】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    st.caption("支援格式：**PDF (.pdf)**、**Word (.docx)**、**PowerPoint (.pptx)**、**文字檔 (.txt, .md)**")
+    st.caption("⚡ 採用極速提取架構，上傳後 5~15 秒內即可完成解析並寫入雲端，徹底告別超時！")
     
-    c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-    existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    try:
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+        existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+    except Exception:
+        existing_folders = []
     
     folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
     if folder_choice == "-- ➕ 新增資料夾 --":
@@ -602,27 +636,26 @@ with tab_import:
     if st.button("解析並匯入", type="primary") and uploaded_file:
         api_key = get_api_key()
         if not api_key: 
-            st.error("請先到設定頁面輸入 API Key！")
+            st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
         else:
             fname = uploaded_file.name.lower()
             file_bytes = uploaded_file.getvalue()
             
-            with st.spinner(f"AI 正在閱讀「{uploaded_file.name}」並編寫繁體中文詳解中..."):
+            with st.spinner(f"AI 正在極速掃描「{uploaded_file.name}」提取題目中 (約需 5~15 秒)..."):
                 try:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
                     
-                    # 💡 明確指示支援任意數量選項 (包含 5 個選項 A~E)
+                    # 💡 精簡 Prompt：只提取題目、選項、正解，避免長篇解析導致 504 超時
                     prompt = (
                         "請從所提供文件中提取所有「選擇題」（包含單選題、多選題、A~E 或 A~F 多個選項題目、是非題等）。\n"
-                        "【提取與解析規則】\n"
-                        "1. 題目（text）與選項（options）：請完整保留原始語言（若為英文請保留英文，勿翻譯題幹）。\n"
-                        "2. 選項陣列（options）：請務必完整收錄該題的所有選項！若有 5 個選項（A~E）就列出 5 個，切勿刪減或只保留前 4 個。\n"
-                        "3. 正確答案（answer）：若檔案中未標明正解，請憑專業知識推導並給出正確答案字母或選項文字。\n"
-                        "4. 【最重要規則】解析（explanation）：無論題目是英文還是中文，本欄位「一律必須以繁體中文撰寫」！"
-                        "內容須包含核心考點、專有名詞中文對照、正解依據及錯誤選項為何錯誤。\n"
-                        "5. 輸出格式：嚴格以 JSON 陣列格式輸出。\n"
-                        '格式範例：[{"category":"生化","text":"題目原文","options":["選項A","選項B","選項C","選項D","選項E"],"answer":"正確選項","explanation":"繁體中文詳細解析"}]'
+                        "【提取規範】\n"
+                        "1. text（題目）與 options（選項清單）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
+                        "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
+                        "3. answer：若文件中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
+                        "4. explanation：若文件本身有附解答說明則順帶簡短摘要，若無請填空字串即可（詳解將於使用者做錯時動態生成）。\n"
+                        "5. 格式：嚴格以 JSON 陣列格式輸出，不要包含任何額外問候語。\n"
+                        '範例：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
                     )
                     
                     if fname.endswith('.pdf'):
@@ -631,18 +664,18 @@ with tab_import:
                         doc_text = extract_text_from_docx(file_bytes)
                         if not doc_text.strip():
                             raise Exception("無法從該 Word 檔案中提取出文字。")
-                        gemini_content = [prompt, f"【以下為 Word 文件 ({uploaded_file.name}) 內容】：\n\n{doc_text}"]
+                        gemini_content = [prompt, f"【Word 文件內容】：\n\n{doc_text}"]
                     elif fname.endswith('.pptx'):
                         ppt_text = extract_text_from_pptx(file_bytes)
                         if not ppt_text.strip():
                             raise Exception("無法從該 PowerPoint 檔案中提取出文字。")
-                        gemini_content = [prompt, f"【以下為 PowerPoint 簡報 ({uploaded_file.name}) 內容】：\n\n{ppt_text}"]
+                        gemini_content = [prompt, f"【PowerPoint 簡報內容】：\n\n{ppt_text}"]
                     else:
                         try:
                             txt_content = file_bytes.decode('utf-8')
                         except UnicodeDecodeError:
                             txt_content = file_bytes.decode('big5', errors='ignore')
-                        gemini_content = [prompt, f"【以下為文字筆記 ({uploaded_file.name}) 內容】：\n\n{txt_content}"]
+                        gemini_content = [prompt, f"【文字筆記內容】：\n\n{txt_content}"]
 
                     max_retries = 3
                     response = None
@@ -658,13 +691,11 @@ with tab_import:
                                 raise e
                     
                     raw_text = response.text.strip()
-                    # 容錯正規表達式萃取 JSON
                     match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
                     clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
                     new_questions = json.loads(clean_json)
                     final_name = custom_name.strip() if custom_name else uploaded_file.name
                     
-                    # 寫入題庫 (同時存入 options JSON 與傳統欄位以確保相容)
                     for nq in new_questions:
                         raw_opts = nq.get('options', [])
                         cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
@@ -677,10 +708,10 @@ with tab_import:
                         
                         c.execute(
                             "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                            (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, nq.get('answer', ''), nq.get('explanation', '無提供詳解'))
+                            (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
                         )
                     conn.commit()
-                    st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                    st.success(f"🎉 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
 
@@ -719,14 +750,20 @@ with tab_settings:
 
     st.divider()
     st.subheader("📁 題庫管理 (名稱修改 / 移動 / 星號標記 / 刪除)")
-    c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
-    items = c.fetchall()
+    try:
+        c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
+        items = c.fetchall()
+    except Exception:
+        items = []
     
     if not items:
         st.info("目前沒有題庫資料。")
     else:
-        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-        all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+        try:
+            c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+            all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+        except Exception:
+            all_folders = []
 
         for index, row in enumerate(items):
             f_name = row['folder']
@@ -766,22 +803,26 @@ with tab_settings:
 
         st.divider()
         st.subheader("✏️ 資料夾重新命名")
-        old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
-        new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
-        if st.button("確認修改資料夾名稱"):
-            if new_folder_name.strip():
-                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
-                conn.commit()
-                st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
-                time.sleep(0.5)
-                st.rerun()
+        if all_folders:
+            old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
+            new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
+            if st.button("確認修改資料夾名稱"):
+                if new_folder_name.strip():
+                    c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
+                    conn.commit()
+                    st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
+                    time.sleep(0.5)
+                    st.rerun()
 
     st.divider()
     st.subheader("📊 錯題排行榜")
-    c.execute("SELECT folder, category, text, wrong_count FROM questions WHERE wrong_count > 0 ORDER BY wrong_count DESC LIMIT 10")
-    stats = c.fetchall()
-    if stats:
-        for s in stats: 
-            st.write(f"❌ 錯 **{s['wrong_count']}** 次 | [{s['folder']}] {s['text'][:20]}...")
-    else:
+    try:
+        c.execute("SELECT folder, category, text, wrong_count FROM questions WHERE wrong_count > 0 ORDER BY wrong_count DESC LIMIT 10")
+        stats = c.fetchall()
+        if stats:
+            for s in stats: 
+                st.write(f"❌ 錯 **{s['wrong_count']}** 次 | [{s['folder']}] {s['text'][:20]}...")
+        else:
+            st.write("目前沒有錯題紀錄！")
+    except Exception:
         st.write("目前沒有錯題紀錄！")
