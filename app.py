@@ -3,10 +3,12 @@ import sqlite3
 import json
 import random
 import time
+import os
 import google.generativeai as genai
 
 # ================= 1. 資料庫初始化 & 自動升級 =================
-conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+DB_FILE = 'quiz_database.db'
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 conn.row_factory = sqlite3.Row 
 c = conn.cursor()
 
@@ -17,6 +19,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS questions
               answer TEXT, wrong_count INTEGER DEFAULT 0)''')
 c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
 
+# 自動檢查欄位相容性
 c.execute("PRAGMA table_info(questions)")
 existing_cols = [col['name'] for col in c.fetchall()]
 if 'explanation' not in existing_cols:
@@ -30,7 +33,7 @@ def get_api_key():
     result = c.fetchone()
     return result['value'] if result else ""
 
-# ================= 2. 狀態管理 (記憶體) =================
+# ================= 2. 狀態管理 =================
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
@@ -39,22 +42,18 @@ if 'explanation' not in st.session_state: st.session_state.explanation = ""
 def load_next_question(target_folder, target_pdf):
     query = "SELECT * FROM questions WHERE 1=1"
     params = []
-    
     if target_folder != "全部資料夾":
         query += " AND folder=?"
         params.append(target_folder)
     if target_pdf != "全部考卷":
         query += " AND category=?"
         params.append(target_pdf)
-        
     query += " ORDER BY wrong_count DESC"
     c.execute(query, params)
-    
     all_q = c.fetchall()
     if not all_q: 
         st.session_state.current_q = None
         return
-        
     pool_size = max(1, len(all_q) // 2)
     st.session_state.current_q = random.choice(all_q[:pool_size])
     st.session_state.answered = False
@@ -74,8 +73,7 @@ def check_answer(selected, correct, q_id):
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
-# 新增「📖 錯題總覽」分頁
-tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與統計"])
+tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與備份"])
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
@@ -83,12 +81,11 @@ with tab_quiz:
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     if not folders:
-        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目！")
+        st.warning("題庫空空如也，請先到「匯入題庫」上傳題目，或到「設定與備份」還原題庫！")
     else:
         col_f, col_p = st.columns(2)
         with col_f:
             selected_folder = st.selectbox("📁 選擇資料夾：", ["全部資料夾"] + folders, key="quiz_folder")
-        
         with col_p:
             if selected_folder == "全部資料夾":
                 c.execute("SELECT DISTINCT category FROM questions")
@@ -109,7 +106,6 @@ with tab_quiz:
         if q:
             st.caption(f"📂 {q['folder']} > 📄 {q['category']} | 歷史錯誤次數：{q['wrong_count']}")
             st.subheader(q['text'])
-            
             options = [q['opt1'], q['opt2'], q['opt3'], q['opt4']]
             correct_ans = q['answer']
             q_id = q['id']
@@ -161,12 +157,11 @@ with tab_quiz:
 # ---------- 【錯題總覽區】 ----------
 with tab_review:
     st.markdown("### 📖 各 PDF 完整題目與答案總覽")
-    
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
     if not folders:
-        st.info("目前沒有任何題庫資料，請先至「匯入題庫」上傳。")
+        st.info("目前沒有題庫資料。")
     else:
         col_f, col_p = st.columns(2)
         with col_f:
@@ -179,7 +174,6 @@ with tab_review:
             rev_pdfs = [row['category'] for row in c.fetchall() if row['category']]
             rev_pdf = st.selectbox("📄 選擇 PDF 考卷：", ["全部考卷"] + rev_pdfs, key="rev_pdf")
             
-        # 根據選擇條件撈出題目
         query = "SELECT * FROM questions WHERE 1=1"
         params = []
         if rev_folder != "全部資料夾":
@@ -193,28 +187,24 @@ with tab_review:
         questions_to_show = c.fetchall()
         
         if not questions_to_show:
-            st.warning("此分類下沒有找到任何題目。")
+            st.warning("此分類下沒有找到題目。")
         else:
             st.write(f"共找到 **{len(questions_to_show)}** 題：")
             st.divider()
-            
             for idx, q in enumerate(questions_to_show):
-                with st.expander(f"題目 {idx+1}: {q['text'][:35]}... (錯誤次數: {q['wrong_count']})"):
+                with st.expander(f"題目 {idx+1}: {q['text'][:35]}... (錯 {q['wrong_count']} 次)"):
                     st.markdown(f"**【題目】** {q['text']}")
                     st.markdown(f"- (A) {q['opt1']}")
                     st.markdown(f"- (B) {q['opt2']}")
                     st.markdown(f"- (C) {q['opt3']}")
                     st.markdown(f"- (D) {q['opt4']}")
                     st.markdown(f"✅ **正確答案**：`{q['answer']}`")
-                    
                     exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解"
                     st.markdown(f"💡 **解析**：{exp_text}")
-                    st.markdown(f"📉 **歷史錯誤次數**：`{q['wrong_count']}` 次")
 
 # ---------- 【匯入區】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧 PDF 匯入")
-    
     c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
     existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
     
@@ -225,19 +215,17 @@ with tab_import:
         target_folder = folder_choice
         
     uploaded_pdf = st.file_uploader("上傳考卷 PDF，AI 會自動切分並寫詳解！", type="pdf")
-    
     default_pdf_name = uploaded_pdf.name if uploaded_pdf else ""
     custom_pdf_name = st.text_input("📄 編輯匯入後的 PDF 名稱：", value=default_pdf_name)
     
     if st.button("解析並匯入", type="primary") and uploaded_pdf:
         api_key = get_api_key()
-        if not api_key: st.error("請先至設定頁面設定 API Key！")
+        if not api_key: st.error("請先到設定頁面輸入 API Key！")
         else:
-            with st.spinner("AI 努力閱讀並撰寫詳解中 (時間較長請耐心等候)..."):
+            with st.spinner("AI 努力閱讀並撰寫詳解中 (約需 15-30 秒)..."):
                 try:
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
-                    
                     prompt = '請提取 PDF 中的「選擇題」。若無解答請補上正解，並為每一題撰寫詳細的解析。嚴格以 JSON 陣列格式輸出：[{"category":"分類","text":"題目","options":["A","B","C","D"],"answer":"正確選項","explanation":"詳細的解題觀念與原因"}]'
                     pdf_part = {"mime_type": "application/pdf", "data": uploaded_pdf.getvalue()}
                     
@@ -256,35 +244,60 @@ with tab_import:
                     
                     raw_text = response.text.replace('```json', '').replace('```', '').strip()
                     new_questions = json.loads(raw_text)
-                    
                     final_name = custom_pdf_name.strip() if custom_pdf_name else uploaded_pdf.name
+                    
                     for nq in new_questions:
                         c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, answer, explanation) VALUES (?,?,?,?,?,?,?,?,?)",
                                   (target_folder, final_name, nq['text'], nq['options'][0], nq['options'][1], nq['options'][2], nq['options'][3], nq['answer'], nq.get('explanation', '無提供詳解')))
                     conn.commit()
                     st.success(f"✅ 成功將 {len(new_questions)} 題匯入至「{target_folder} / {final_name}」！")
+                    st.info("💡 提示：匯入完成後，建議到「⚙️ 設定與備份」點擊下載備份檔，存至 Google 雲端！")
                     st.session_state.current_q = None
                 except Exception as e:
                     st.error(f"解析失敗，詳細錯誤：{e}")
-                  
-# ---------- 【設定與統計區】 ----------
+
+# ---------- 【設定與備份區】 ----------
 with tab_settings:
-    st.subheader("🔑 API 設定")
+    st.subheader("💾 題庫備份與還原 (防重啟遺失)")
+    st.caption("匯入新考卷後，點擊下方按鈕將檔案存入 iPad 或 Google 雲端硬碟；伺服器重啟時一鍵還原！")
+    
+    col_dl, col_ul = st.columns(2)
+    with col_dl:
+        # 讀取本地資料庫提供下載
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "rb") as fp:
+                st.download_button(
+                    label="📥 下載題庫備份檔 (.db)",
+                    data=fp,
+                    file_name="quiz_database.db",
+                    mime="application/x-sqlite3",
+                    use_container_width=True
+                )
+    with col_ul:
+        restore_file = st.file_uploader("選取 .db 檔案以還原", type=["db"], label_visibility="collapsed")
+        if restore_file:
+            with open(DB_FILE, "wb") as f:
+                f.write(restore_file.getvalue())
+            st.success("✅ 題庫已成功還原！重新整理頁面中...")
+            time.sleep(1)
+            st.rerun()
+
+    st.divider()
+    st.subheader("🔑 API Key 設定")
     current_key = get_api_key()
     new_key = st.text_input("輸入 Gemini API Key", value=current_key, type="password")
     if st.button("儲存設定"):
         c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
         conn.commit()
         st.success("設定已儲存！")
-        
+
     st.divider()
-    
     st.subheader("📁 題庫與資料夾管理")
     c.execute("SELECT DISTINCT folder, category FROM questions")
     items = c.fetchall()
     
     if not items:
-        st.info("目前沒有任何題庫資料。")
+        st.info("目前沒有題庫資料。")
     else:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
         all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
@@ -292,7 +305,6 @@ with tab_settings:
         for index, row in enumerate(items):
             f_name = row['folder']
             p_name = row['category']
-            
             with st.expander(f"📂 {f_name} ＞ 📄 {p_name}"):
                 new_p_name = st.text_input("修改 PDF 名稱", value=p_name, key=f"p_rename_{index}")
                 target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
