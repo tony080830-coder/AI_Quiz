@@ -5,6 +5,7 @@ import time
 import os
 import io
 import re
+import base64
 import zipfile
 import xml.etree.ElementTree as ET
 import google.generativeai as genai
@@ -18,7 +19,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA0MzMzNzYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.RhhdrMA0SExmET39mWRfenDK7qMfhnqJUFN8zJSqap_daPCMFyOS08cl7HinR17U49Op5EqFBpYVbTPkvCo1CQ"
+TURSO_AUTH_TOKEN = "你的_TURSO_AUTH_TOKEN"
 
 IS_CLOUD = False
 CLOUD_ERROR = ""
@@ -161,6 +162,9 @@ try:
         c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
     if 'options' not in existing_cols:
         c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
+    # 🌟 新增：自訂詳解圖片 Base64 欄位
+    if 'explanation_image' not in existing_cols:
+        c.execute("ALTER TABLE questions ADD COLUMN explanation_image TEXT DEFAULT ''")
     conn.commit()
 except Exception:
     pass
@@ -492,8 +496,37 @@ with tab_quiz:
                                     except Exception as e:
                                         st.error(f"AI 生成詳解失敗：{e}")
 
+                # 顯示既有文字詳解
                 if st.session_state.explanation:
                     st.info(st.session_state.explanation)
+                elif curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解':
+                    st.info(curr_q['explanation'])
+
+                # 顯示既有圖片詳解（若有）
+                if 'explanation_image' in curr_q and curr_q['explanation_image'] and curr_q['explanation_image'].strip():
+                    st.markdown("**📸 個人筆記/解題截圖：**")
+                    st.image(curr_q['explanation_image'], use_container_width=True)
+
+                # 🌟 做題當下隨手新增/更新個人詳解或圖片 (完全不消耗 API 額度)
+                with st.expander("✏️️ 手動編輯詳解 / 上傳筆記截圖 (不消耗 AI 額度)"):
+                    custom_exp_text = st.text_area("輸入文字詳解或口訣重點：", value=curr_q['explanation'] if curr_q['explanation'] and curr_q['explanation'] != '無提供詳解' else "", key=f"custom_exp_txt_{q_id}")
+                    uploaded_note_img = st.file_uploader("上傳解題筆記/課本截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"note_img_{q_id}")
+                    
+                    if st.button("💾 儲存自訂筆記至雲端", key=f"btn_save_note_{q_id}", type="primary"):
+                        img_b64 = curr_q['explanation_image'] if 'explanation_image' in curr_q else ""
+                        if uploaded_note_img:
+                            b_data = uploaded_note_img.getvalue()
+                            encoded = base64.b64encode(b_data).decode('utf-8')
+                            img_b64 = f"data:{uploaded_note_img.type};base64,{encoded}"
+                        
+                        c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (custom_exp_text.strip(), img_b64, q_id))
+                        conn.commit()
+                        c.execute("SELECT * FROM questions WHERE id=?", (q_id,))
+                        st.session_state.exam_questions[idx] = c.fetchone()
+                        st.session_state.explanation = custom_exp_text.strip()
+                        st.toast("✅ 個人筆記與截圖已成功儲存至 Turso 雲端！")
+                        time.sleep(0.5)
+                        st.rerun()
 
         elif st.session_state.exam_finished:
             st.balloons()
@@ -553,6 +586,8 @@ with tab_quiz:
                             st.markdown(f"✅ **正確答案**：`{q_data['answer']}`")
                             exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
                             st.caption(f"💡 解析：{exp}")
+                            if 'explanation_image' in q_data and q_data['explanation_image'] and q_data['explanation_image'].strip():
+                                st.image(q_data['explanation_image'], use_container_width=True)
             else:
                 st.info("太棒了！本次測驗全對，零錯題！")
 
@@ -566,7 +601,7 @@ with tab_quiz:
                 st.session_state.exam_skipped_ids = []
                 st.rerun()
 
-# ---------- 【錯題總覽區】 ----------
+# ---------- 【錯題總覽區 (支援隨時維護文字與圖片筆記)】 ----------
 with tab_review:
     st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
     try:
@@ -628,9 +663,35 @@ with tab_review:
                         opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
                         st.markdown(f"- ({opt_label}) {opt_text}")
                     st.markdown(f"✅ **正確答案**：`{q['answer']}`")
-                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未生成詳解 (做題時可一鍵生成)"
+                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
                     st.markdown(f"💡 **解析**：{exp_text}")
+                    if 'explanation_image' in q and q['explanation_image'] and q['explanation_image'].strip():
+                        st.image(q['explanation_image'], caption="📸 解題筆記/截圖", use_container_width=True)
                     st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
+
+                    # 🌟 總覽區直接維護筆記與圖片
+                    with st.expander("✏️ 編輯此題詳解 / 更新筆記截圖"):
+                        rev_exp_input = st.text_area("修改文字解析：", value=q['explanation'] if q['explanation'] and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
+                        rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
+                        col_sv_b, col_rm_img = st.columns(2)
+                        with col_sv_b:
+                            if st.button("💾 儲存修改", key=f"rev_save_btn_{q['id']}", use_container_width=True):
+                                new_img_b64 = q['explanation_image'] if 'explanation_image' in q else ""
+                                if rev_img_input:
+                                    b_val = rev_img_input.getvalue()
+                                    new_img_b64 = f"data:{rev_img_input.type};base64,{base64.b64encode(b_val).decode('utf-8')}"
+                                c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, q['id']))
+                                conn.commit()
+                                st.toast("✅ 詳解已更新！")
+                                time.sleep(0.5)
+                                st.rerun()
+                        with col_rm_img:
+                            if st.button("🗑️ 清除既有截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
+                                c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
+                                conn.commit()
+                                st.toast("✅ 筆記截圖已移除！")
+                                time.sleep(0.5)
+                                st.rerun()
 
 # ---------- 【匯入區：智慧大批次 + 自訂頁數補抓引擎】 ----------
 with tab_import:
@@ -673,7 +734,6 @@ with tab_import:
         with col_n:
             custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
         with col_p:
-            # 🌟 自訂頁數範圍補抓功能
             page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：81-88", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
         
         if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
@@ -698,7 +758,6 @@ with tab_import:
                     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
                     total_pdf_pages = len(reader.pages)
                     
-                    # 解析指定頁數範圍
                     start_page_limit = 0
                     end_page_limit = total_pdf_pages
                     if page_range_str.strip():
