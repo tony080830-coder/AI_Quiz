@@ -169,7 +169,6 @@ def get_db_connection():
 conn, IS_CLOUD, CLOUD_ERROR = get_db_connection()
 c = conn.cursor()
 
-# 🌟 快取資料夾清單，避免每次打字或點擊都向雲端撈取
 @st.cache_data(ttl=60)
 def get_cached_folders():
     try:
@@ -262,6 +261,7 @@ def extract_text_from_pptx(file_bytes):
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
+if 'user_selected' not in st.session_state: st.session_state.user_selected = ""
 if 'explanation' not in st.session_state: st.session_state.explanation = ""
 
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
@@ -275,6 +275,7 @@ if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs
 
 def check_answer(selected, correct, q_id):
     st.session_state.answered = True
+    st.session_state.user_selected = selected.strip()
     is_right = (selected.strip() == correct.strip())
     if not is_right and len(correct) == 1 and selected.startswith(correct):
         is_right = True
@@ -306,11 +307,11 @@ else:
 
 tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與管理"])
 
-# ---------- 【測驗區 (極致流暢)】 ----------
+# ---------- 【測驗區】 ----------
 with tab_quiz:
     folders = get_cached_folders()
     
-    if not folders and not st.session_state.exam_active:
+    if not folders and not st.session_state.exam_active and not st.session_state.exam_finished:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
     else:
         if not st.session_state.exam_active and not st.session_state.exam_finished:
@@ -369,7 +370,6 @@ with tab_quiz:
                     if not q_pool:
                         st.warning("所選條件下無任何題目！")
                     else:
-                        # 轉為可修改的 dict 清單，支援記憶體即時更新
                         q_pool_dicts = [dict(q) for q in q_pool]
                         if q_count_option != "全部題目":
                             pick_n = int(q_count_option.replace(" 題", ""))
@@ -390,6 +390,7 @@ with tab_quiz:
                         st.session_state.exam_active = True
                         st.session_state.exam_finished = False
                         st.session_state.answered = False
+                        st.session_state.user_selected = ""
                         st.session_state.explanation = ""
                         st.rerun()
 
@@ -403,12 +404,16 @@ with tab_quiz:
             with col_prog:
                 st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 對：{len(st.session_state.exam_correct_ids)} / 錯：{len(st.session_state.exam_wrong_ids)} / 略過：{len(st.session_state.exam_skipped_ids)}")
             with col_quit:
+                # 🌟 極速中斷結算（秒切，不卡頓）
                 if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
                     answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                     if answered_so_far > 0:
-                        c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
-                                  (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
-                        conn.commit()
+                        try:
+                            c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                      (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                            conn.commit()
+                        except Exception:
+                            pass
                     st.session_state.exam_active = False
                     st.session_state.exam_finished = True
                     st.rerun()
@@ -416,7 +421,7 @@ with tab_quiz:
             col_t, col_s = st.columns([4, 1.2])
             is_q_st = bool(curr_q['is_starred'])
             with col_t:
-                st.subheader(curr_q['text'])
+                st.subheader(f"Q{idx + 1}. {curr_q['text']}")
             with col_s:
                 if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"ex_star_{curr_q['id']}", use_container_width=True):
                     new_star = 0 if is_q_st else 1
@@ -450,22 +455,40 @@ with tab_quiz:
                     if is_last:
                         answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                         if answered_so_far > 0:
-                            c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
-                                      (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
-                            conn.commit()
+                            try:
+                                c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                          (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                                conn.commit()
+                            except Exception:
+                                pass
                         st.session_state.exam_active = False
                         st.session_state.exam_finished = True
                     else:
                         st.session_state.exam_index += 1
                         st.session_state.answered = False
+                        st.session_state.user_selected = ""
                         st.session_state.explanation = ""
                     st.rerun()
 
             else:
                 if st.session_state.is_correct:
-                    st.success("✅ 答對了！")
+                    st.success("✅ 恭喜答對！")
                 else:
-                    st.error(f"❌ 答錯了！正確答案是：{correct_ans}")
+                    st.error(f"❌ 答錯了！正確答案是：**{correct_ans}**（你的選擇：{st.session_state.user_selected}）")
+
+                st.markdown("#### 📋 題目選項完整對照：")
+                for opt_idx, opt_text in enumerate(options):
+                    is_this_correct = (opt_text.strip() == correct_ans.strip()) or (len(correct_ans) == 1 and opt_text.startswith(correct_ans))
+                    is_this_user_pick = (opt_text.strip() == st.session_state.user_selected)
+                    
+                    if is_this_correct:
+                        st.markdown(f"- **:green[✅ {opt_text} （正解）]**")
+                    elif is_this_user_pick:
+                        st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
+                    else:
+                        st.markdown(f"- <span style='color: gray;'>{opt_text}</span>", unsafe_allow_html=True)
+
+                st.divider()
 
                 col_next, col_exp = st.columns(2)
                 with col_next:
@@ -473,14 +496,20 @@ with tab_quiz:
                     btn_label = "🏁 完成並結算" if is_last else "👉 下一題"
                     if st.button(btn_label, type="primary", use_container_width=True):
                         if is_last:
-                            c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
-                                      (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
-                            conn.commit()
+                            answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
+                            if answered_so_far > 0:
+                                try:
+                                    c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                              (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                                    conn.commit()
+                                except Exception:
+                                    pass
                             st.session_state.exam_active = False
                             st.session_state.exam_finished = True
                         else:
                             st.session_state.exam_index += 1
                             st.session_state.answered = False
+                            st.session_state.user_selected = ""
                             st.session_state.explanation = ""
                         st.rerun()
 
@@ -527,7 +556,6 @@ with tab_quiz:
                     st.markdown("**📸 個人筆記/解題截圖：**")
                     st.image(curr_q['explanation_image'], use_container_width=True)
 
-                # 🌟 核心突破：打字儲存 0.1 秒極速反應（樂觀更新 + 移除二度 Rerun）
                 with st.expander("✏ 手動編輯詳解 / 上傳筆記截圖 (極速秒存，不耗 AI 額度)"):
                     custom_exp_text = st.text_area("輸入文字詳解或口訣重點：", value=curr_q['explanation'] if curr_q['explanation'] and curr_q['explanation'] != '無提供詳解' else "", key=f"custom_exp_txt_{q_id}")
                     uploaded_note_img = st.file_uploader("上傳解題筆記/課本截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"note_img_{q_id}")
@@ -537,17 +565,16 @@ with tab_quiz:
                         if uploaded_note_img:
                             img_b64 = compress_image_to_base64(uploaded_note_img)
                         
-                        # 背景單次直接更新
                         c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (custom_exp_text.strip(), img_b64, q_id))
                         conn.commit()
                         
-                        # 記憶體即時同步，完全不需等待雲端回查或強迫頁面重載
                         curr_q['explanation'] = custom_exp_text.strip()
                         curr_q['explanation_image'] = img_b64
                         st.session_state.explanation = custom_exp_text.strip()
                         st.toast("⚡ 已極速儲存！")
                         st.rerun()
 
+        # ---------- 【結算成果頁（全記憶體瞬開，徹底告別卡頓）】 ----------
         elif st.session_state.exam_finished:
             st.balloons()
             st.success("🎉 測驗已結束！本次練習總結如下：")
@@ -564,24 +591,6 @@ with tab_quiz:
             col_m3.metric("🔴 答錯題數", f"{len(curr_wrong)} 題")
             col_m4.metric("⏭️ 略過題數", f"{skipped_cnt} 題")
 
-            if len(st.session_state.exam_tested_pdfs) == 1:
-                single_pdf = st.session_state.exam_tested_pdfs[0]
-                try:
-                    c.execute("SELECT * FROM exam_history WHERE category=? ORDER BY id DESC LIMIT 2", (single_pdf,))
-                    histories = c.fetchall()
-                    if len(histories) >= 2:
-                        prev_wrong = set(json.loads(histories[1]['wrong_ids']))
-                        prev_correct = set(json.loads(histories[1]['correct_ids']))
-                        persistent = curr_wrong.intersection(prev_wrong)
-                        improved = prev_wrong.intersection(curr_correct)
-
-                        st.markdown("#### 🔄 與上次同份考卷對比")
-                        c_p1, c_p2 = st.columns(2)
-                        c_p1.metric("🔴 兩次皆錯 (頑固題)", f"{len(persistent)} 題")
-                        c_p2.metric("🟢 成功雪恥 (上次錯這次對)", f"{len(improved)} 題")
-                except Exception:
-                    pass
-
             st.divider()
 
             if curr_wrong:
@@ -590,19 +599,25 @@ with tab_quiz:
                     c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({placeholders})", tuple(curr_wrong))
                     conn.commit()
                     st.toast("✅ 本次錯題已全部加為星號收藏！")
-                    time.sleep(0.5)
 
                 st.subheader(f"❌ 本次答錯檢討 ({len(curr_wrong)} 題)")
+                
+                # 🌟 核心突破：建立記憶體高速索引表，0 次資料庫連線，0.01 秒秒開檢討！
+                mem_q_map = {q['id']: q for q in st.session_state.exam_questions}
+                
                 for qid in curr_wrong:
-                    c.execute("SELECT * FROM questions WHERE id=?", (qid,))
-                    q_data = c.fetchone()
+                    q_data = mem_q_map.get(qid)
                     if q_data:
                         opts_review = get_question_options(q_data)
                         with st.expander(f"[{q_data['category']}] {q_data['text'][:30]}..."):
                             st.markdown(f"**題目**：{q_data['text']}")
                             for i, opt_item in enumerate(opts_review):
                                 label = chr(65 + i) if i < 26 else str(i + 1)
-                                st.markdown(f"- ({label}) {opt_item}")
+                                is_ans = (opt_item.strip() == str(q_data['answer']).strip()) or (len(str(q_data['answer']).strip()) == 1 and opt_item.startswith(str(q_data['answer']).strip()))
+                                if is_ans:
+                                    st.markdown(f"- **:green[({label}) {opt_item} （正解）]**")
+                                else:
+                                    st.markdown(f"- ({label}) {opt_item}")
                             st.markdown(f"✅ **正確答案**：`{q_data['answer']}`")
                             exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
                             st.caption(f"💡 解析：{exp}")
@@ -619,12 +634,13 @@ with tab_quiz:
                 st.session_state.exam_wrong_ids = []
                 st.session_state.exam_correct_ids = []
                 st.session_state.exam_skipped_ids = []
+                st.session_state.user_selected = ""
                 st.rerun()
 
-# ---------- 【錯題總覽區 (測驗進行時自動休眠，防止背景搶頻寬)】 ----------
+# ---------- 【錯題總覽區 (測驗或看結算報告時自動靜音，防止搶頻寬)】 ----------
 with tab_review:
-    if st.session_state.exam_active:
-        st.info("⚡ 測驗進行中，背景查詢已自動暫停以確保刷題與編輯筆記零延遲。完成測驗後即可在此查閱完整題庫。")
+    if st.session_state.exam_active or st.session_state.exam_finished:
+        st.info("⚡ 測驗或查看報告中，背景查詢已自動暫停以確保零延遲。點擊「繼續新的練習 / 重新開始」回到首頁後即可查閱完整題庫。")
     else:
         st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
         folders = get_cached_folders()
@@ -748,7 +764,7 @@ with tab_import:
         if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
             api_key = get_api_key()
             if not api_key: 
-                st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
+                st.error("請先到「⚙️️ 設定與管理」輸入 API Key！")
             else:
                 fname = uploaded_file.name.lower()
                 file_bytes = uploaded_file.getvalue()
@@ -843,7 +859,7 @@ with tab_import:
                                 status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
                                 time.sleep(60)
                             else:
-                                st.warning(f"⚠️ {b_info['title']} 略過：{e}")
+                                st.warning(f"⚠️️ {b_info['title']} 略過：{e}")
                                 break
                     
                     if response and response.text:
@@ -876,7 +892,7 @@ with tab_import:
                 
                 status_box.empty()
                 prog_bar.empty()
-                get_cached_folders.clear()  # 清除快取，立即反應新資料夾
+                get_cached_folders.clear()
                 if total_imported > 0:
                     st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 else:
@@ -923,7 +939,7 @@ with tab_import:
                     except Exception as e:
                         st.error(f"解析失敗，詳細錯誤：{e}")
 
-# ---------- 【設定與管理區 (測驗期間休眠統計查詢)】 ----------
+# ---------- 【設定與管理區 (報告或測驗期間休眠)】 ----------
 with tab_settings:
     st.subheader("🔑 API Key 設定")
     current_key = get_api_key()
@@ -933,7 +949,7 @@ with tab_settings:
         conn.commit()
         st.success("設定已儲存！" + (" (已同步至雲端)" if IS_CLOUD else ""))
 
-    if not st.session_state.exam_active:
+    if not (st.session_state.exam_active or st.session_state.exam_finished):
         if not IS_CLOUD:
             st.divider()
             st.subheader("💾 本地備份與還原 (未設定 Turso 時可用)")
@@ -991,7 +1007,7 @@ with tab_settings:
                     if col_star_pdf.button(star_btn_txt, key=f"star_pdf_{index}", use_container_width=True):
                         new_p_star = 0 if is_pdf_st else 1
                         c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", 
-                                  (new_p_star, f_name, p_name))
+                              (new_p_star, f_name, p_name))
                         conn.commit()
                         st.rerun()
                         
@@ -1029,4 +1045,4 @@ with tab_settings:
         except Exception:
             st.write("目前沒有錯題紀錄！")
     else:
-        st.caption("⚡ 測驗進行中，管理與統計列表暫時休眠以保持刷題順暢。")
+        st.caption("⚡ 測驗或查看報告中，管理面板休眠以保持頁面極速反應。")
