@@ -8,6 +8,7 @@ import re
 import base64
 import zipfile
 import xml.etree.ElementTree as ET
+from PIL import Image
 import google.generativeai as genai
 
 # 嘗試載入 PDF 自動切頁核心套件
@@ -19,11 +20,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA4MjA3MTEsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.hEkp5-VW2xwCJBJo5DW3SLOA6-KSStad3yJclFqKX_yNWHFXbAC-qy-9bid4SP2vw1Ms10fM6FxM9kYowMSeCw"
-
-IS_CLOUD = False
-CLOUD_ERROR = ""
-db_conn = None
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMDEzODYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.MAVdjJMf4zq2GrnOuelc1h28R71ip02LXgc7QO8lTi9GK5bWa4OZdf8TrOvlvh-MR2D9YLAdc0jTY1qp4VK_Ag"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -109,8 +106,10 @@ class DBWrapper:
         except Exception:
             pass
 
-def init_connection():
-    global IS_CLOUD, CLOUD_ERROR
+@st.cache_resource
+def get_db_connection():
+    is_cloud = False
+    cloud_err = ""
     if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
         try:
             import libsql_experimental as libsql
@@ -118,56 +117,81 @@ def init_connection():
             test_cur = raw_conn.cursor()
             test_cur.execute("SELECT 1")
             test_cur.fetchall()
-            IS_CLOUD = True
-            return DBWrapper(raw_conn, is_cloud=True)
+            is_cloud = True
+            wrapper = DBWrapper(raw_conn, is_cloud=True)
         except Exception as e:
-            CLOUD_ERROR = str(e)
+            cloud_err = str(e)
             import sqlite3
             raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-            IS_CLOUD = False
-            return DBWrapper(raw_conn, is_cloud=False)
+            is_cloud = False
+            wrapper = DBWrapper(raw_conn, is_cloud=False)
     else:
         import sqlite3
         raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-        IS_CLOUD = False
-        return DBWrapper(raw_conn, is_cloud=False)
+        is_cloud = False
+        wrapper = DBWrapper(raw_conn, is_cloud=False)
 
-conn = init_connection()
-c = conn.cursor()
-
-# ================= 1. 資料庫初始化 & 自動升級 =================
-try:
-    c.execute('''CREATE TABLE IF NOT EXISTS questions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  category TEXT, text TEXT, 
-                  opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, 
-                  answer TEXT, wrong_count INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS exam_history
+    try:
+        cur = wrapper.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS questions
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                      category TEXT, text TEXT, 
+                      opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, 
+                      answer TEXT, wrong_count INTEGER DEFAULT 0)''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS exam_history
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   category TEXT, 
                   wrong_ids TEXT, 
                   correct_ids TEXT, 
                   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    c.execute("PRAGMA table_info(questions)")
-    existing_cols = [col['name'] for col in c.fetchall()]
-    if 'explanation' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
-    if 'folder' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
-    if 'is_starred' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
-    if 'pdf_starred' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
-    if 'options' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
-    # 🌟 新增：自訂詳解圖片 Base64 欄位
-    if 'explanation_image' not in existing_cols:
-        c.execute("ALTER TABLE questions ADD COLUMN explanation_image TEXT DEFAULT ''")
-    conn.commit()
-except Exception:
-    pass
+        cur.execute("PRAGMA table_info(questions)")
+        existing_cols = [col['name'] for col in cur.fetchall()]
+        if 'explanation' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
+        if 'folder' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
+        if 'is_starred' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
+        if 'pdf_starred' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
+        if 'options' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
+        if 'explanation_image' not in existing_cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN explanation_image TEXT DEFAULT ''")
+        wrapper.commit()
+    except Exception:
+        pass
+
+    return wrapper, is_cloud, cloud_err
+
+conn, IS_CLOUD, CLOUD_ERROR = get_db_connection()
+c = conn.cursor()
+
+# 🌟 快取資料夾清單，避免每次打字或點擊都向雲端撈取
+@st.cache_data(ttl=60)
+def get_cached_folders():
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
+        return [row['folder'] for row in cur.fetchall() if row['folder']]
+    except Exception:
+        return []
+
+def compress_image_to_base64(uploaded_file, max_size=(800, 800), quality=70):
+    try:
+        img = Image.open(uploaded_file)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        encoded = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        encoded = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
+        return f"data:{uploaded_file.type};base64,{encoded}"
 
 def get_api_key():
     try:
@@ -191,7 +215,7 @@ def get_question_options(q):
             opts.append(str(q[col]).strip())
     return opts if opts else ["A", "B"]
 
-# ================= 2. 檔案文字提取工具函式 =================
+# ================= 1. 檔案文字提取工具函式 =================
 def extract_text_from_docx(file_bytes):
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
@@ -234,7 +258,7 @@ def extract_text_from_pptx(file_bytes):
     except Exception as e:
         return f"[PPT 提取錯誤: {e}]"
 
-# ================= 3. 狀態管理 =================
+# ================= 2. 狀態管理 =================
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
@@ -268,7 +292,7 @@ def check_answer(selected, correct, q_id):
     except Exception:
         pass
 
-# ================= 4. 網頁介面開始 =================
+# ================= 3. 網頁介面開始 =================
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
@@ -282,15 +306,11 @@ else:
 
 tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "📖 錯題總覽", "📥 匯入題庫", "⚙️ 設定與管理"])
 
-# ---------- 【測驗區】 ----------
+# ---------- 【測驗區 (極致流暢)】 ----------
 with tab_quiz:
-    try:
-        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-        folders = [row['folder'] for row in c.fetchall() if row['folder']]
-    except Exception:
-        folders = []
+    folders = get_cached_folders()
     
-    if not folders:
+    if not folders and not st.session_state.exam_active:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
     else:
         if not st.session_state.exam_active and not st.session_state.exam_finished:
@@ -349,13 +369,15 @@ with tab_quiz:
                     if not q_pool:
                         st.warning("所選條件下無任何題目！")
                     else:
+                        # 轉為可修改的 dict 清單，支援記憶體即時更新
+                        q_pool_dicts = [dict(q) for q in q_pool]
                         if q_count_option != "全部題目":
                             pick_n = int(q_count_option.replace(" 題", ""))
-                            actual_pool = q_pool[:max(pick_n * 2, len(q_pool))]
+                            actual_pool = q_pool_dicts[:max(pick_n * 2, len(q_pool_dicts))]
                             random.shuffle(actual_pool)
                             st.session_state.exam_questions = actual_pool[:pick_n]
                         else:
-                            q_list = list(q_pool)
+                            q_list = list(q_pool_dicts)
                             if q_order != "照考卷順序":
                                 random.shuffle(q_list)
                             st.session_state.exam_questions = q_list
@@ -400,8 +422,7 @@ with tab_quiz:
                     new_star = 0 if is_q_st else 1
                     c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, curr_q['id']))
                     conn.commit()
-                    c.execute("SELECT * FROM questions WHERE id=?", (curr_q['id'],))
-                    st.session_state.exam_questions[idx] = c.fetchone()
+                    curr_q['is_starred'] = new_star
                     st.rerun()
 
             options = get_question_options(curr_q)
@@ -487,45 +508,44 @@ with tab_quiz:
                                             "2. 請點出關鍵核心考點與專有名詞中英對照。\n"
                                             "3. 詳細說明正解正確之原因，並逐一剖析其他錯誤選項錯在哪裡。"
                                         )
-                                        resp = model.generate_content(prompt, request_options={"timeout": 120})
+                                        resp = model.generate_content(prompt, request_options={"timeout": 60})
                                         new_exp = resp.text.strip()
                                         c.execute("UPDATE questions SET explanation=? WHERE id=?", (new_exp, q_id))
                                         conn.commit()
+                                        curr_q['explanation'] = new_exp
                                         st.session_state.explanation = new_exp
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"AI 生成詳解失敗：{e}")
 
-                # 顯示既有文字詳解
                 if st.session_state.explanation:
                     st.info(st.session_state.explanation)
                 elif curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解':
                     st.info(curr_q['explanation'])
 
-                # 顯示既有圖片詳解（若有）
                 if 'explanation_image' in curr_q and curr_q['explanation_image'] and curr_q['explanation_image'].strip():
                     st.markdown("**📸 個人筆記/解題截圖：**")
                     st.image(curr_q['explanation_image'], use_container_width=True)
 
-                # 🌟 做題當下隨手新增/更新個人詳解或圖片 (完全不消耗 API 額度)
-                with st.expander("✏️️ 手動編輯詳解 / 上傳筆記截圖 (不消耗 AI 額度)"):
+                # 🌟 核心突破：打字儲存 0.1 秒極速反應（樂觀更新 + 移除二度 Rerun）
+                with st.expander("✏ 手動編輯詳解 / 上傳筆記截圖 (極速秒存，不耗 AI 額度)"):
                     custom_exp_text = st.text_area("輸入文字詳解或口訣重點：", value=curr_q['explanation'] if curr_q['explanation'] and curr_q['explanation'] != '無提供詳解' else "", key=f"custom_exp_txt_{q_id}")
                     uploaded_note_img = st.file_uploader("上傳解題筆記/課本截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"note_img_{q_id}")
                     
                     if st.button("💾 儲存自訂筆記至雲端", key=f"btn_save_note_{q_id}", type="primary"):
                         img_b64 = curr_q['explanation_image'] if 'explanation_image' in curr_q else ""
                         if uploaded_note_img:
-                            b_data = uploaded_note_img.getvalue()
-                            encoded = base64.b64encode(b_data).decode('utf-8')
-                            img_b64 = f"data:{uploaded_note_img.type};base64,{encoded}"
+                            img_b64 = compress_image_to_base64(uploaded_note_img)
                         
+                        # 背景單次直接更新
                         c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (custom_exp_text.strip(), img_b64, q_id))
                         conn.commit()
-                        c.execute("SELECT * FROM questions WHERE id=?", (q_id,))
-                        st.session_state.exam_questions[idx] = c.fetchone()
+                        
+                        # 記憶體即時同步，完全不需等待雲端回查或強迫頁面重載
+                        curr_q['explanation'] = custom_exp_text.strip()
+                        curr_q['explanation_image'] = img_b64
                         st.session_state.explanation = custom_exp_text.strip()
-                        st.toast("✅ 個人筆記與截圖已成功儲存至 Turso 雲端！")
-                        time.sleep(0.5)
+                        st.toast("⚡ 已極速儲存！")
                         st.rerun()
 
         elif st.session_state.exam_finished:
@@ -601,107 +621,96 @@ with tab_quiz:
                 st.session_state.exam_skipped_ids = []
                 st.rerun()
 
-# ---------- 【錯題總覽區 (支援隨時維護文字與圖片筆記)】 ----------
+# ---------- 【錯題總覽區 (測驗進行時自動休眠，防止背景搶頻寬)】 ----------
 with tab_review:
-    st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
-    try:
-        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-        folders = [row['folder'] for row in c.fetchall() if row['folder']]
-    except Exception:
-        folders = []
-    
-    if not folders:
-        st.info("目前沒有題庫資料。")
+    if st.session_state.exam_active:
+        st.info("⚡ 測驗進行中，背景查詢已自動暫停以確保刷題與編輯筆記零延遲。完成測驗後即可在此查閱完整題庫。")
     else:
-        col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
-        with col_f:
-            rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders, key="rev_folder")
-        with col_p:
-            if rev_folder == "全部資料夾":
-                c.execute("SELECT DISTINCT category, pdf_starred FROM questions")
-            else:
-                c.execute("SELECT DISTINCT category, pdf_starred FROM questions WHERE folder=?", (rev_folder,))
-            rev_rows = c.fetchall()
-            rev_pdfs = [row['category'] for row in rev_rows if row['category']]
-            rev_star_map = {row['category']: bool(row['pdf_starred']) for row in rev_rows}
-            rev_pdf = st.selectbox(
-                "📄 選擇考卷 / 講義：", 
-                ["全部考卷"] + rev_pdfs, 
-                key="rev_pdf",
-                format_func=lambda x: f"⭐ {x}" if rev_star_map.get(x) else x
-            )
-        with col_st:
-            st.write("")
-            rev_only_starred = st.checkbox("⭐ 僅看星號題目", value=False, key="rev_only_star")
-            
-        query = "SELECT * FROM questions WHERE 1=1"
-        params = []
-        if rev_folder != "全部資料夾":
-            query += " AND folder=?"
-            params.append(rev_folder)
-        if rev_pdf != "全部考卷":
-            query += " AND category=?"
-            params.append(rev_pdf)
-        if rev_only_starred:
-            query += " AND is_starred=1"
-            
-        c.execute(query, tuple(params))
-        questions_to_show = c.fetchall()
-        
-        if not questions_to_show:
-            st.warning("此分類下沒有找到題目。")
+        st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
+        folders = get_cached_folders()
+        if not folders:
+            st.info("目前沒有題庫資料。")
         else:
-            st.write(f"共找到 **{len(questions_to_show)}** 題：")
-            st.divider()
-            for idx, q in enumerate(questions_to_show):
-                is_st = bool(q['is_starred'])
-                star_tag = "⭐ " if is_st else ""
-                q_opts = get_question_options(q)
-                with st.expander(f"{star_tag}題目 {idx+1}: {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
-                    st.markdown(f"**【題目】** {q['text']}")
-                    for opt_i, opt_text in enumerate(q_opts):
-                        opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
-                        st.markdown(f"- ({opt_label}) {opt_text}")
-                    st.markdown(f"✅ **正確答案**：`{q['answer']}`")
-                    exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
-                    st.markdown(f"💡 **解析**：{exp_text}")
-                    if 'explanation_image' in q and q['explanation_image'] and q['explanation_image'].strip():
-                        st.image(q['explanation_image'], caption="📸 解題筆記/截圖", use_container_width=True)
-                    st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
+            col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
+            with col_f:
+                rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders, key="rev_folder")
+            with col_p:
+                if rev_folder == "全部資料夾":
+                    c.execute("SELECT DISTINCT category, pdf_starred FROM questions")
+                else:
+                    c.execute("SELECT DISTINCT category, pdf_starred FROM questions WHERE folder=?", (rev_folder,))
+                rev_rows = c.fetchall()
+                rev_pdfs = [row['category'] for row in rev_rows if row['category']]
+                rev_star_map = {row['category']: bool(row['pdf_starred']) for row in rev_rows}
+                rev_pdf = st.selectbox(
+                    "📄 選擇考卷 / 講義：", 
+                    ["全部考卷"] + rev_pdfs, 
+                    key="rev_pdf",
+                    format_func=lambda x: f"⭐ {x}" if rev_star_map.get(x) else x
+                )
+            with col_st:
+                st.write("")
+                rev_only_starred = st.checkbox("⭐ 僅看星號題目", value=False, key="rev_only_star")
+                
+            query = "SELECT * FROM questions WHERE 1=1"
+            params = []
+            if rev_folder != "全部資料夾":
+                query += " AND folder=?"
+                params.append(rev_folder)
+            if rev_pdf != "全部考卷":
+                query += " AND category=?"
+                params.append(rev_pdf)
+            if rev_only_starred:
+                query += " AND is_starred=1"
+                
+            c.execute(query, tuple(params))
+            questions_to_show = c.fetchall()
+            
+            if not questions_to_show:
+                st.warning("此分類下沒有找到題目。")
+            else:
+                st.write(f"共找到 **{len(questions_to_show)}** 題：")
+                st.divider()
+                for idx, q in enumerate(questions_to_show):
+                    is_st = bool(q['is_starred'])
+                    star_tag = "⭐ " if is_st else ""
+                    q_opts = get_question_options(q)
+                    with st.expander(f"{star_tag}題目 {idx+1}: {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
+                        st.markdown(f"**【題目】** {q['text']}")
+                        for opt_i, opt_text in enumerate(q_opts):
+                            opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
+                            st.markdown(f"- ({opt_label}) {opt_text}")
+                        st.markdown(f"✅ **正確答案**：`{q['answer']}`")
+                        exp_text = q['explanation'] if q['explanation'] and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
+                        st.markdown(f"💡 **解析**：{exp_text}")
+                        if 'explanation_image' in q and q['explanation_image'] and q['explanation_image'].strip():
+                            st.image(q['explanation_image'], caption="📸 解題筆記/截圖", use_container_width=True)
+                        st.markdown(f"📌 **星號狀態**：{'⭐ 已收藏' if is_st else '☆ 未收藏'}")
 
-                    # 🌟 總覽區直接維護筆記與圖片
-                    with st.expander("✏️ 編輯此題詳解 / 更新筆記截圖"):
-                        rev_exp_input = st.text_area("修改文字解析：", value=q['explanation'] if q['explanation'] and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
-                        rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
-                        col_sv_b, col_rm_img = st.columns(2)
-                        with col_sv_b:
-                            if st.button("💾 儲存修改", key=f"rev_save_btn_{q['id']}", use_container_width=True):
-                                new_img_b64 = q['explanation_image'] if 'explanation_image' in q else ""
-                                if rev_img_input:
-                                    b_val = rev_img_input.getvalue()
-                                    new_img_b64 = f"data:{rev_img_input.type};base64,{base64.b64encode(b_val).decode('utf-8')}"
-                                c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, q['id']))
-                                conn.commit()
-                                st.toast("✅ 詳解已更新！")
-                                time.sleep(0.5)
-                                st.rerun()
-                        with col_rm_img:
-                            if st.button("🗑️ 清除既有截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
-                                c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
-                                conn.commit()
-                                st.toast("✅ 筆記截圖已移除！")
-                                time.sleep(0.5)
-                                st.rerun()
+                        with st.expander("✏️ 編輯此題詳解 / 更新筆記截圖"):
+                            rev_exp_input = st.text_area("修改文字解析：", value=q['explanation'] if q['explanation'] and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
+                            rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
+                            col_sv_b, col_rm_img = st.columns(2)
+                            with col_sv_b:
+                                if st.button("💾 儲存修改", key=f"rev_save_btn_{q['id']}", use_container_width=True):
+                                    new_img_b64 = q['explanation_image'] if 'explanation_image' in q else ""
+                                    if rev_img_input:
+                                        new_img_b64 = compress_image_to_base64(rev_img_input)
+                                    c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, q['id']))
+                                    conn.commit()
+                                    st.toast("✅ 詳解已極速更新！")
+                                    st.rerun()
+                            with col_rm_img:
+                                if st.button("🗑️ 清除既有截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
+                                    c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
+                                    conn.commit()
+                                    st.toast("✅ 筆記截圖已移除！")
+                                    st.rerun()
 
-# ---------- 【匯入區：智慧大批次 + 自訂頁數補抓引擎】 ----------
+# ---------- 【匯入區】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    
-    try:
-        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-        existing_folders = [row['folder'] for row in c.fetchall() if row['folder']]
-    except Exception:
-        existing_folders = []
+    existing_folders = get_cached_folders()
     
     folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
     if folder_choice == "-- ➕ 新增資料夾 --":
@@ -867,6 +876,7 @@ with tab_import:
                 
                 status_box.empty()
                 prog_bar.empty()
+                get_cached_folders.clear()  # 清除快取，立即反應新資料夾
                 if total_imported > 0:
                     st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 else:
@@ -908,11 +918,12 @@ with tab_import:
                                 (target_folder, final_pname, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
                             )
                         conn.commit()
+                        get_cached_folders.clear()
                         st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                     except Exception as e:
                         st.error(f"解析失敗，詳細錯誤：{e}")
 
-# ---------- 【設定與管理區】 ----------
+# ---------- 【設定與管理區 (測驗期間休眠統計查詢)】 ----------
 with tab_settings:
     st.subheader("🔑 API Key 設定")
     current_key = get_api_key()
@@ -922,104 +933,100 @@ with tab_settings:
         conn.commit()
         st.success("設定已儲存！" + (" (已同步至雲端)" if IS_CLOUD else ""))
 
-    if not IS_CLOUD:
-        st.divider()
-        st.subheader("💾 本地備份與還原 (未設定 Turso 時可用)")
-        col_dl, col_ul = st.columns(2)
-        with col_dl:
-            if os.path.exists('quiz_database.db'):
-                with open('quiz_database.db', "rb") as fp:
-                    st.download_button(
-                        label="📥 下載題庫備份檔 (.db)",
-                        data=fp,
-                        file_name="quiz_database.db",
-                        mime="application/x-sqlite3",
-                        use_container_width=True
-                    )
-        with col_ul:
-            restore_file = st.file_uploader("選取 .db檔案以還原", type=["db"], label_visibility="collapsed")
-            if restore_file:
-                with open('quiz_database.db', "wb") as f:
-                    f.write(restore_file.getvalue())
-                st.success("✅ 題庫已成功還原！重新整理頁面中...")
-                time.sleep(1)
-                st.rerun()
+    if not st.session_state.exam_active:
+        if not IS_CLOUD:
+            st.divider()
+            st.subheader("💾 本地備份與還原 (未設定 Turso 時可用)")
+            col_dl, col_ul = st.columns(2)
+            with col_dl:
+                if os.path.exists('quiz_database.db'):
+                    with open('quiz_database.db', "rb") as fp:
+                        st.download_button(
+                            label="📥 下載題庫備份檔 (.db)",
+                            data=fp,
+                            file_name="quiz_database.db",
+                            mime="application/x-sqlite3",
+                            use_container_width=True
+                        )
+            with col_ul:
+                restore_file = st.file_uploader("選取 .db檔案以還原", type=["db"], label_visibility="collapsed")
+                if restore_file:
+                    with open('quiz_database.db', "wb") as f:
+                        f.write(restore_file.getvalue())
+                    st.success("✅ 題庫已成功還原！重新整理頁面中...")
+                    time.sleep(1)
+                    st.rerun()
 
-    st.divider()
-    st.subheader("📁 題庫管理 (名稱修改 / 移動 / 星號標記 / 刪除)")
-    try:
-        c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
-        items = c.fetchall()
-    except Exception:
-        items = []
-    
-    if not items:
-        st.info("目前沒有題庫資料。")
-    else:
+        st.divider()
+        st.subheader("📁 題庫管理 (名稱修改 / 移動 / 星號標記 / 刪除)")
         try:
-            c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-            all_folders = [row['folder'] for row in c.fetchall() if row['folder']]
+            c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
+            items = c.fetchall()
         except Exception:
-            all_folders = []
-
-        for index, row in enumerate(items):
-            f_name = row['folder']
-            p_name = row['category']
-            is_pdf_st = bool(row['pdf_starred'])
-            
-            exp_title = f"{'⭐ ' if is_pdf_st else ''}📂 {f_name} ＞ 📄 {p_name}"
-            with st.expander(exp_title):
-                new_p_name = st.text_input("修改名稱", value=p_name, key=f"p_rename_{index}")
-                target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
+            items = []
+        
+        if items:
+            all_folders = get_cached_folders()
+            for index, row in enumerate(items):
+                f_name = row['folder']
+                p_name = row['category']
+                is_pdf_st = bool(row['pdf_starred'])
                 
-                col_save, col_star_pdf, col_del = st.columns(3)
-                if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
-                    c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", 
-                              (new_p_name, target_f, f_name, p_name))
-                    c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
-                    conn.commit()
-                    st.success("✅ 更新成功！")
-                    time.sleep(0.5)
-                    st.rerun()
+                exp_title = f"{'⭐ ' if is_pdf_st else ''}📂 {f_name} ＞ 📄 {p_name}"
+                with st.expander(exp_title):
+                    new_p_name = st.text_input("修改名稱", value=p_name, key=f"p_rename_{index}")
+                    target_f = st.selectbox("移動至資料夾", all_folders, index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"f_move_{index}")
                     
-                star_btn_txt = "⭐ 取消考卷星號" if is_pdf_st else "☆ 標記為星號考卷"
-                if col_star_pdf.button(star_btn_txt, key=f"star_pdf_{index}", use_container_width=True):
-                    new_p_star = 0 if is_pdf_st else 1
-                    c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", 
-                              (new_p_star, f_name, p_name))
-                    conn.commit()
-                    st.rerun()
-                    
-                if col_del.button("🗑️ 刪除此卷", key=f"del_{index}", use_container_width=True):
-                    c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
-                    c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
-                    conn.commit()
-                    st.success("✅ 已刪除！")
-                    time.sleep(0.5)
-                    st.rerun()
+                    col_save, col_star_pdf, col_del = st.columns(3)
+                    if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
+                        c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", 
+                                  (new_p_name, target_f, f_name, p_name))
+                        c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
+                        conn.commit()
+                        get_cached_folders.clear()
+                        st.success("✅ 更新成功！")
+                        st.rerun()
+                        
+                    star_btn_txt = "⭐ 取消考卷星號" if is_pdf_st else "☆ 標記為星號考卷"
+                    if col_star_pdf.button(star_btn_txt, key=f"star_pdf_{index}", use_container_width=True):
+                        new_p_star = 0 if is_pdf_st else 1
+                        c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", 
+                                  (new_p_star, f_name, p_name))
+                        conn.commit()
+                        st.rerun()
+                        
+                    if col_del.button("🗑️ 刪除此卷", key=f"del_{index}", use_container_width=True):
+                        c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
+                        c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
+                        conn.commit()
+                        get_cached_folders.clear()
+                        st.success("✅ 已刪除！")
+                        st.rerun()
+
+            st.divider()
+            st.subheader("✏️ 資料夾重新命名")
+            if all_folders:
+                old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
+                new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
+                if st.button("確認修改資料夾名稱"):
+                    if new_folder_name.strip():
+                        c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
+                        conn.commit()
+                        get_cached_folders.clear()
+                        st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
+                        st.rerun()
 
         st.divider()
-        st.subheader("✏️ 資料夾重新命名")
-        if all_folders:
-            old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders, key="rename_folder_select")
-            new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
-            if st.button("確認修改資料夾名稱"):
-                if new_folder_name.strip():
-                    c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
-                    conn.commit()
-                    st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
-                    time.sleep(0.5)
-                    st.rerun()
-
-    st.divider()
-    st.subheader("📊 錯題排行榜")
-    try:
-        c.execute("SELECT folder, category, text, wrong_count FROM questions WHERE wrong_count > 0 ORDER BY wrong_count DESC LIMIT 10")
-        stats = c.fetchall()
-        if stats:
-            for s in stats: 
-                st.write(f"❌ 錯 **{s['wrong_count']}** 次 | [{s['folder']}] {s['text'][:20]}...")
-        else:
+        st.subheader("📊 錯題排行榜")
+        try:
+            c.execute("SELECT folder, category, text, wrong_count FROM questions WHERE wrong_count > 0 ORDER BY wrong_count DESC LIMIT 10")
+            stats = c.fetchall()
+            if stats:
+                for s in stats: 
+                    st.write(f"❌ 錯 **{s['wrong_count']}** 次 | [{s['folder']}] {s['text'][:20]}...")
+            else:
+                st.write("目前沒有錯題紀錄！")
+        except Exception:
             st.write("目前沒有錯題紀錄！")
-    except Exception:
-        st.write("目前沒有錯題紀錄！")
+    else:
+        st.caption("⚡ 測驗進行中，管理與統計列表暫時休眠以保持刷題順暢。")
