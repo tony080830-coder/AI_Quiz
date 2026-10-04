@@ -20,7 +20,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMzA4NTgsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.JKreMww_fqS3AP6Gv0GWfFc1XX4bP6W_cBWiDnuJlSSmHYW0pAgZQR0UQeEatHuZSVbIusfrhmfo0lWwEktPCg"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMzMzMDgsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.Y6-wSdQ4W-2k6fO7oVzx-xS078l2M8iyH24iFbbKzRMaOcXPCTTGtvXqk8RUjU-pPrW_joUTB4dDp1N1SqOWAQ"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -133,7 +133,6 @@ def init_connection():
 conn, IS_CLOUD, CLOUD_ERROR = init_connection()
 c = conn.cursor()
 
-# 🌟 資料庫結構升級：單次會話只執行一次，徹底消滅重複 ALTER TABLE 延遲
 if '_db_schema_ready' not in st.session_state:
     try:
         c.execute('''CREATE TABLE IF NOT EXISTS questions
@@ -143,11 +142,11 @@ if '_db_schema_ready' not in st.session_state:
                       answer TEXT, wrong_count INTEGER DEFAULT 0)''')
         c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS exam_history
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      category TEXT, 
-                      wrong_ids TEXT, 
-                      correct_ids TEXT, 
-                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  category TEXT, 
+                  wrong_ids TEXT, 
+                  correct_ids TEXT, 
+                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
         c.execute("PRAGMA table_info(questions)")
         existing_cols = [col['name'] for col in c.fetchall()]
@@ -168,7 +167,6 @@ if '_db_schema_ready' not in st.session_state:
     except Exception:
         pass
 
-# 🌟 穩健解析資料夾，絕不遺漏任何題庫資料
 def get_all_folders():
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
@@ -189,7 +187,6 @@ def get_all_folders():
     except Exception:
         return []
 
-# 🌟 穩健解析考卷/講義名稱
 def get_categories_by_folder(folder=None, only_star=False):
     try:
         query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
@@ -262,7 +259,6 @@ def get_question_options(q):
             opts.append(str(q[col]).strip())
     return opts if opts else ["A", "B"]
 
-# ================= 1. 檔案文字提取工具函式 =================
 def extract_text_from_docx(file_bytes):
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
@@ -470,7 +466,6 @@ with tab_quiz:
             correct_ans = str(curr_q['answer']).strip()
             q_id = curr_q['id']
 
-            # ---------------- 尚未作答狀態 ----------------
             if not st.session_state.answered:
                 for opt_idx, opt in enumerate(options):
                     if st.button(opt, key=f"ex_btn_{q_id}_{opt_idx}", use_container_width=True):
@@ -484,7 +479,7 @@ with tab_quiz:
                         st.rerun()
                 
                 st.write("")
-                if st.button("⏭️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
+                if st.button("⏭️️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
                     if q_id not in st.session_state.exam_skipped_ids:
                         st.session_state.exam_skipped_ids.append(q_id)
                     
@@ -507,14 +502,12 @@ with tab_quiz:
                         st.session_state.explanation = ""
                     st.rerun()
 
-            # ---------------- 已作答狀態（完整題目與選項呈現） ----------------
             else:
                 if st.session_state.is_correct:
                     st.success("✅ 恭喜答對！")
                 else:
                     st.error(f"❌ 答錯了！正確答案是：**{correct_ans}**（你的選擇：{st.session_state.user_selected}）")
 
-                # 🌟 完整選項色彩對照
                 st.markdown("#### 📋 題目選項完整對照：")
                 for opt_idx, opt_text in enumerate(options):
                     is_this_correct = (opt_text.strip() == correct_ans.strip()) or (len(correct_ans) == 1 and opt_text.startswith(correct_ans))
@@ -613,7 +606,6 @@ with tab_quiz:
                         st.toast("⚡ 已極速儲存！")
                         st.rerun()
 
-        # ---------- 【結算成果頁（全記憶體瞬開）】 ----------
         elif st.session_state.exam_finished:
             st.balloons()
             st.success("🎉 測驗已結束！本次練習總結如下：")
@@ -674,7 +666,7 @@ with tab_quiz:
                 st.session_state.user_selected = ""
                 st.rerun()
 
-# ---------- 【錯題總覽區 (測驗或看結算報告時自動靜音)】 ----------
+# ---------- 【錯題總覽區】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 測驗或查看報告中，背景查詢已自動暫停以確保零延遲。點擊「繼續新的練習 / 重新開始」回到首頁後即可查閱完整題庫。")
@@ -754,7 +746,7 @@ with tab_review:
                                     st.toast("✅ 筆記截圖已移除！")
                                     st.rerun()
 
-# ---------- 【匯入區】 ----------
+# ---------- 【匯入區：黃金 10 頁穩健批次 + 即時透明題目預覽】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
     existing_folders = get_all_folders()
@@ -790,7 +782,7 @@ with tab_import:
         with col_n:
             custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
         with col_p:
-            page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：81-88", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
+            page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：1-10 或 11-20", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
         
         if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
             api_key = get_api_key()
@@ -802,6 +794,7 @@ with tab_import:
                 final_name = custom_name.strip() if custom_name else uploaded_file.name
                 
                 genai.configure(api_key=api_key)
+                # 維持使用 gemini-3.8-flash 模型
                 model = genai.GenerativeModel('gemini-3.8-flash')
                 
                 batches = []
@@ -822,14 +815,16 @@ with tab_import:
                             start_page_limit = max(0, int(parts[0].strip()) - 1)
                             end_page_limit = min(total_pdf_pages, int(parts[1].strip()))
                         except Exception:
-                            st.warning("⚠️ 頁數格式不正確（例如請填寫：81-88），將自動解析全部頁數。")
+                            st.warning("⚠️ 頁數格式不正確（例如請填寫：1-10），將自動解析全部頁數。")
                             start_page_limit = 0
                             end_page_limit = total_pdf_pages
 
                     actual_page_count = end_page_limit - start_page_limit
-                    PAGES_PER_BATCH = max(20, (actual_page_count + 4) // 5) if actual_page_count > 25 else actual_page_count
                     
-                    st.info(f"📖 目標範圍：第 **{start_page_limit + 1} ~ {end_page_limit}** 頁（共 {actual_page_count} 頁），系統自動排程解析中...")
+                    # 🌟 穩健設定：每批固定 10 頁，完全杜絕 60 秒 504 截斷超時
+                    PAGES_PER_BATCH = 10
+                    
+                    st.info(f"📖 目標範圍：第 **{start_page_limit + 1} ~ {end_page_limit}** 頁（共 {actual_page_count} 頁），系統以每批 10 頁極速安全解析中...")
                     
                     for start_p in range(start_page_limit, end_page_limit, PAGES_PER_BATCH):
                         end_p = min(start_p + PAGES_PER_BATCH, end_page_limit)
@@ -875,20 +870,24 @@ with tab_import:
                 status_box = st.empty()
                 total_batches = len(batches)
                 total_imported = 0
+                all_imported_summary = []
                 
                 for b_idx, b_info in enumerate(batches):
-                    status_box.markdown(f"⏳ **正在全速處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
+                    status_box.markdown(f"⏳ **正在處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
                     
                     max_retries = 3
                     response = None
                     for attempt in range(max_retries):
                         try:
-                            response = model.generate_content(b_info['content'], request_options={"timeout": 150})
+                            response = model.generate_content(b_info['content'], request_options={"timeout": 90})
                             break
                         except Exception as e:
                             if "429" in str(e) and attempt < max_retries - 1:
                                 status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
                                 time.sleep(60)
+                            elif ("504" in str(e) or "Deadline" in str(e)) and attempt < max_retries - 1:
+                                status_box.warning(f"⏳ 遇伺服器暫態延遲，重試該批次中... ({attempt+1}/{max_retries})")
+                                time.sleep(3)
                             else:
                                 st.warning(f"⚠️ {b_info['title']} 略過：{e}")
                                 break
@@ -900,37 +899,52 @@ with tab_import:
                             clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
                             chunk_questions = json.loads(clean_json) if clean_json and clean_json != "[]" else []
                             
-                            for nq in chunk_questions:
-                                raw_opts = nq.get('options', [])
-                                cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
-                                opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
-                                o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
-                                o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
-                                o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
-                                o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                            if chunk_questions:
+                                # 🌟 即時將這批抓到的題目清楚展開呈現給你看！
+                                with st.expander(f"📋 {b_info['title']} 成功抓取 {len(chunk_questions)} 題 (點此展開看明細)", expanded=True):
+                                    for q_sub_idx, nq in enumerate(chunk_questions, 1):
+                                        current_q_num = total_imported + q_sub_idx
+                                        q_txt = nq.get('text', '')
+                                        raw_opts = nq.get('options', [])
+                                        cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                        ans_txt = str(nq.get('answer', '')).strip()
+                                        
+                                        st.markdown(f"**第 {current_q_num} 題**：{q_txt}")
+                                        st.caption(f"選項：{', '.join(cleaned_opts)}  |  正解：`{ans_txt}`")
+                                        
+                                        opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
+                                        o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
+                                        o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
+                                        o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
+                                        o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                                        
+                                        c.execute(
+                                            "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                            (target_folder, final_name, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
+                                        )
+                                        all_imported_summary.append({"num": current_q_num, "text": q_txt, "answer": ans_txt})
                                 
-                                c.execute(
-                                    "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                    (target_folder, final_name, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
-                                )
-                            conn.commit()
-                            total_imported += len(chunk_questions)
+                                conn.commit()
+                                total_imported += len(chunk_questions)
                         except Exception:
                             pass
                     
                     prog_bar.progress((b_idx + 1) / total_batches)
-                    time.sleep(2)
+                    time.sleep(1.5)
                 
                 status_box.empty()
                 prog_bar.empty()
                 if total_imported > 0:
                     st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                    with st.expander("🔍 檢視本次完整匯入題目總覽清單", expanded=False):
+                        for item in all_imported_summary:
+                            st.write(f"**第 {item['num']} 題**：{item['text']} (答案：`{item['answer']}`)")
                 else:
                     st.warning("處理完畢，但未在檔案所選範圍中找到符合標準格式的選擇題。")
 
     else:
         st.info("💡 **文字貼上模式**：在 PDF 中選取未匯入的頁數文字直接貼上，免重傳檔案，瞬間追加！")
-        pname = st.text_input("📄 考卷/講義名稱 (務必填寫相同名稱以自動追加)：", value="CH21.pdf")
+        pname = st.text_input("📄 考卷/講義名稱 (務必填寫相同名稱以自動追加)：", value="CH15.pdf")
         ptext = st.text_area("請在此貼上題目文字：", height=250, placeholder="例如：\n1. What is...\nA. ...\nB. ...")
         
         if st.button("🚀 解析貼上內容並匯入", type="primary") and ptext.strip():
@@ -950,21 +964,29 @@ with tab_import:
                         new_questions = json.loads(clean_json)
                         final_pname = pname.strip() if pname.strip() else "未命名考卷"
                         
-                        for nq in new_questions:
-                            raw_opts = nq.get('options', [])
-                            cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
-                            opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
-                            o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
-                            o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
-                            o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
-                            o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
-                            
-                            c.execute(
-                                "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                (target_folder, final_pname, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
-                            )
-                        conn.commit()
-                        st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                        if new_questions:
+                            with st.expander(f"📋 成功抓取 {len(new_questions)} 題明細", expanded=True):
+                                for q_idx, nq in enumerate(new_questions, 1):
+                                    q_txt = nq.get('text', '')
+                                    raw_opts = nq.get('options', [])
+                                    cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                    ans_txt = str(nq.get('answer', '')).strip()
+                                    
+                                    st.markdown(f"**第 {q_idx} 題**：{q_txt}")
+                                    st.caption(f"選項：{', '.join(cleaned_opts)}  |  正解：`{ans_txt}`")
+                                    
+                                    opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
+                                    o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
+                                    o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
+                                    o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
+                                    o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                                    
+                                    c.execute(
+                                        "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                        (target_folder, final_pname, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
+                                    )
+                            conn.commit()
+                            st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                     except Exception as e:
                         st.error(f"解析失敗，詳細錯誤：{e}")
 
