@@ -20,7 +20,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMDEzODYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.MAVdjJMf4zq2GrnOuelc1h28R71ip02LXgc7QO8lTi9GK5bWa4OZdf8TrOvlvh-MR2D9YLAdc0jTY1qp4VK_Ag"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMzA4NTgsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.JKreMww_fqS3AP6Gv0GWfFc1XX4bP6W_cBWiDnuJlSSmHYW0pAgZQR0UQeEatHuZSVbIusfrhmfo0lWwEktPCg"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -106,11 +106,11 @@ class DBWrapper:
         except Exception:
             pass
 
-@st.cache_resource
-def get_db_connection():
+def init_connection():
+    global IS_CLOUD, CLOUD_ERROR
     is_cloud = False
     cloud_err = ""
-    if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
+    if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_") and not TURSO_AUTH_TOKEN.startswith("你的_"):
         try:
             import libsql_experimental as libsql
             raw_conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
@@ -119,64 +119,112 @@ def get_db_connection():
             test_cur.fetchall()
             is_cloud = True
             wrapper = DBWrapper(raw_conn, is_cloud=True)
+            return wrapper, is_cloud, cloud_err
         except Exception as e:
             cloud_err = str(e)
             import sqlite3
             raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-            is_cloud = False
-            wrapper = DBWrapper(raw_conn, is_cloud=False)
+            return DBWrapper(raw_conn, is_cloud=False), False, cloud_err
     else:
         import sqlite3
         raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-        is_cloud = False
-        wrapper = DBWrapper(raw_conn, is_cloud=False)
+        return DBWrapper(raw_conn, is_cloud=False), False, cloud_err
 
+conn, IS_CLOUD, CLOUD_ERROR = init_connection()
+c = conn.cursor()
+
+# 🌟 資料庫結構升級：單次會話只執行一次，徹底消滅重複 ALTER TABLE 延遲
+if '_db_schema_ready' not in st.session_state:
     try:
-        cur = wrapper.cursor()
-        cur.execute('''CREATE TABLE IF NOT EXISTS questions
+        c.execute('''CREATE TABLE IF NOT EXISTS questions
                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                       category TEXT, text TEXT, 
                       opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, 
                       answer TEXT, wrong_count INTEGER DEFAULT 0)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS exam_history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  category TEXT, 
-                  wrong_ids TEXT, 
-                  correct_ids TEXT, 
-                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS exam_history
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                      category TEXT, 
+                      wrong_ids TEXT, 
+                      correct_ids TEXT, 
+                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-        cur.execute("PRAGMA table_info(questions)")
-        existing_cols = [col['name'] for col in cur.fetchall()]
+        c.execute("PRAGMA table_info(questions)")
+        existing_cols = [col['name'] for col in c.fetchall()]
         if 'explanation' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
+            c.execute("ALTER TABLE questions ADD COLUMN explanation TEXT DEFAULT ''")
         if 'folder' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
+            c.execute("ALTER TABLE questions ADD COLUMN folder TEXT DEFAULT '未分類'")
         if 'is_starred' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE questions ADD COLUMN is_starred INTEGER DEFAULT 0")
         if 'pdf_starred' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE questions ADD COLUMN pdf_starred INTEGER DEFAULT 0")
         if 'options' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
+            c.execute("ALTER TABLE questions ADD COLUMN options TEXT DEFAULT ''")
         if 'explanation_image' not in existing_cols:
-            cur.execute("ALTER TABLE questions ADD COLUMN explanation_image TEXT DEFAULT ''")
-        wrapper.commit()
+            c.execute("ALTER TABLE questions ADD COLUMN explanation_image TEXT DEFAULT ''")
+        conn.commit()
+        st.session_state['_db_schema_ready'] = True
     except Exception:
         pass
 
-    return wrapper, is_cloud, cloud_err
-
-conn, IS_CLOUD, CLOUD_ERROR = get_db_connection()
-c = conn.cursor()
-
-@st.cache_data(ttl=60)
-def get_cached_folders():
+# 🌟 穩健解析資料夾，絕不遺漏任何題庫資料
+def get_all_folders():
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL")
-        return [row['folder'] for row in cur.fetchall() if row['folder']]
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
+        raw_rows = c.fetchall()
+        result = []
+        for r in raw_rows:
+            val = None
+            if isinstance(r, (tuple, list)):
+                val = r[0] if len(r) > 0 else None
+            elif isinstance(r, dict) or hasattr(r, 'keys'):
+                val = r.get('folder') if hasattr(r, 'get') else r['folder']
+            else:
+                try: val = r['folder']
+                except Exception: val = r[0]
+            if val and str(val).strip():
+                result.append(str(val).strip())
+        return sorted(list(set(result)))
     except Exception:
         return []
+
+# 🌟 穩健解析考卷/講義名稱
+def get_categories_by_folder(folder=None, only_star=False):
+    try:
+        query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
+        params = []
+        if folder and folder != "全部資料夾":
+            query += " AND folder=?"
+            params.append(folder)
+        if only_star:
+            query += " AND pdf_starred=1"
+        c.execute(query, tuple(params))
+        rows = c.fetchall()
+        pdf_list = []
+        star_map = {}
+        for r in rows:
+            cat = None
+            star = 0
+            if isinstance(r, (tuple, list)):
+                cat = r[0] if len(r) > 0 else None
+                star = r[1] if len(r) > 1 else 0
+            elif isinstance(r, dict) or hasattr(r, 'keys'):
+                cat = r.get('category')
+                star = r.get('pdf_starred', 0)
+            else:
+                try:
+                    cat = r['category']
+                    star = r['pdf_starred']
+                except Exception:
+                    cat = r[0]
+            if cat and str(cat).strip():
+                c_str = str(cat).strip()
+                pdf_list.append(c_str)
+                star_map[c_str] = bool(star)
+        return sorted(list(set(pdf_list))), star_map
+    except Exception:
+        return [], {}
 
 def compress_image_to_base64(uploaded_file, max_size=(800, 800), quality=70):
     try:
@@ -309,7 +357,7 @@ tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
-    folders = get_cached_folders()
+    folders = get_all_folders()
     
     if not folders and not st.session_state.exam_active and not st.session_state.exam_finished:
         st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
@@ -323,18 +371,7 @@ with tab_quiz:
                 only_star_pdf = st.checkbox("⭐ 僅列星號考卷", value=False)
                 only_star_q = st.checkbox("⭐ 只刷星號題目", value=False)
 
-            pdf_query = "SELECT DISTINCT category, pdf_starred FROM questions WHERE 1=1"
-            pdf_params = []
-            if selected_folder != "全部資料夾":
-                pdf_query += " AND folder=?"
-                pdf_params.append(selected_folder)
-            if only_star_pdf:
-                pdf_query += " AND pdf_starred=1"
-            
-            c.execute(pdf_query, tuple(pdf_params))
-            pdf_rows = c.fetchall()
-            all_available_pdfs = [row['category'] for row in pdf_rows if row['category']]
-            pdf_star_map = {row['category']: bool(row['pdf_starred']) for row in pdf_rows}
+            all_available_pdfs, pdf_star_map = get_categories_by_folder(selected_folder, only_star_pdf)
 
             selected_pdfs = st.multiselect(
                 "📄 勾選要練習的考卷 / 講義（可複選混合出題）：",
@@ -404,7 +441,6 @@ with tab_quiz:
             with col_prog:
                 st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 對：{len(st.session_state.exam_correct_ids)} / 錯：{len(st.session_state.exam_wrong_ids)} / 略過：{len(st.session_state.exam_skipped_ids)}")
             with col_quit:
-                # 🌟 極速中斷結算（秒切，不卡頓）
                 if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
                     answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                     if answered_so_far > 0:
@@ -434,6 +470,7 @@ with tab_quiz:
             correct_ans = str(curr_q['answer']).strip()
             q_id = curr_q['id']
 
+            # ---------------- 尚未作答狀態 ----------------
             if not st.session_state.answered:
                 for opt_idx, opt in enumerate(options):
                     if st.button(opt, key=f"ex_btn_{q_id}_{opt_idx}", use_container_width=True):
@@ -470,12 +507,14 @@ with tab_quiz:
                         st.session_state.explanation = ""
                     st.rerun()
 
+            # ---------------- 已作答狀態（完整題目與選項呈現） ----------------
             else:
                 if st.session_state.is_correct:
                     st.success("✅ 恭喜答對！")
                 else:
                     st.error(f"❌ 答錯了！正確答案是：**{correct_ans}**（你的選擇：{st.session_state.user_selected}）")
 
+                # 🌟 完整選項色彩對照
                 st.markdown("#### 📋 題目選項完整對照：")
                 for opt_idx, opt_text in enumerate(options):
                     is_this_correct = (opt_text.strip() == correct_ans.strip()) or (len(correct_ans) == 1 and opt_text.startswith(correct_ans))
@@ -524,7 +563,7 @@ with tab_quiz:
                             if not api_key:
                                 st.error("請至「⚙️ 設定與管理」輸入 API Key！")
                             else:
-                                with st.spinner("AI 正在為這題撰寫繁體中文深度詳解..."):
+                                with st.spinner("AI 正在撰寫繁體中文深度詳解..."):
                                     try:
                                         genai.configure(api_key=api_key)
                                         model = genai.GenerativeModel('gemini-3.8-flash')
@@ -574,7 +613,7 @@ with tab_quiz:
                         st.toast("⚡ 已極速儲存！")
                         st.rerun()
 
-        # ---------- 【結算成果頁（全記憶體瞬開，徹底告別卡頓）】 ----------
+        # ---------- 【結算成果頁（全記憶體瞬開）】 ----------
         elif st.session_state.exam_finished:
             st.balloons()
             st.success("🎉 測驗已結束！本次練習總結如下：")
@@ -601,8 +640,6 @@ with tab_quiz:
                     st.toast("✅ 本次錯題已全部加為星號收藏！")
 
                 st.subheader(f"❌ 本次答錯檢討 ({len(curr_wrong)} 題)")
-                
-                # 🌟 核心突破：建立記憶體高速索引表，0 次資料庫連線，0.01 秒秒開檢討！
                 mem_q_map = {q['id']: q for q in st.session_state.exam_questions}
                 
                 for qid in curr_wrong:
@@ -637,13 +674,13 @@ with tab_quiz:
                 st.session_state.user_selected = ""
                 st.rerun()
 
-# ---------- 【錯題總覽區 (測驗或看結算報告時自動靜音，防止搶頻寬)】 ----------
+# ---------- 【錯題總覽區 (測驗或看結算報告時自動靜音)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 測驗或查看報告中，背景查詢已自動暫停以確保零延遲。點擊「繼續新的練習 / 重新開始」回到首頁後即可查閱完整題庫。")
     else:
         st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
-        folders = get_cached_folders()
+        folders = get_all_folders()
         if not folders:
             st.info("目前沒有題庫資料。")
         else:
@@ -651,13 +688,7 @@ with tab_review:
             with col_f:
                 rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders, key="rev_folder")
             with col_p:
-                if rev_folder == "全部資料夾":
-                    c.execute("SELECT DISTINCT category, pdf_starred FROM questions")
-                else:
-                    c.execute("SELECT DISTINCT category, pdf_starred FROM questions WHERE folder=?", (rev_folder,))
-                rev_rows = c.fetchall()
-                rev_pdfs = [row['category'] for row in rev_rows if row['category']]
-                rev_star_map = {row['category']: bool(row['pdf_starred']) for row in rev_rows}
+                rev_pdfs, rev_star_map = get_categories_by_folder(rev_folder)
                 rev_pdf = st.selectbox(
                     "📄 選擇考卷 / 講義：", 
                     ["全部考卷"] + rev_pdfs, 
@@ -726,7 +757,7 @@ with tab_review:
 # ---------- 【匯入區】 ----------
 with tab_import:
     st.markdown("### 🤖 智慧題庫匯入")
-    existing_folders = get_cached_folders()
+    existing_folders = get_all_folders()
     
     folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
     if folder_choice == "-- ➕ 新增資料夾 --":
@@ -764,7 +795,7 @@ with tab_import:
         if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
             api_key = get_api_key()
             if not api_key: 
-                st.error("請先到「⚙️️ 設定與管理」輸入 API Key！")
+                st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
             else:
                 fname = uploaded_file.name.lower()
                 file_bytes = uploaded_file.getvalue()
@@ -859,7 +890,7 @@ with tab_import:
                                 status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
                                 time.sleep(60)
                             else:
-                                st.warning(f"⚠️️ {b_info['title']} 略過：{e}")
+                                st.warning(f"⚠️ {b_info['title']} 略過：{e}")
                                 break
                     
                     if response and response.text:
@@ -892,7 +923,6 @@ with tab_import:
                 
                 status_box.empty()
                 prog_bar.empty()
-                get_cached_folders.clear()
                 if total_imported > 0:
                     st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                 else:
@@ -934,12 +964,11 @@ with tab_import:
                                 (target_folder, final_pname, nq.get('text', ''), o1, o2, o3, o4, opts_json, str(nq.get('answer', '')), nq.get('explanation', ''))
                             )
                         conn.commit()
-                        get_cached_folders.clear()
                         st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
                     except Exception as e:
                         st.error(f"解析失敗，詳細錯誤：{e}")
 
-# ---------- 【設定與管理區 (報告或測驗期間休眠)】 ----------
+# ---------- 【設定與管理區】 ----------
 with tab_settings:
     st.subheader("🔑 API Key 設定")
     current_key = get_api_key()
@@ -982,7 +1011,7 @@ with tab_settings:
             items = []
         
         if items:
-            all_folders = get_cached_folders()
+            all_folders = get_all_folders()
             for index, row in enumerate(items):
                 f_name = row['folder']
                 p_name = row['category']
@@ -999,7 +1028,6 @@ with tab_settings:
                                   (new_p_name, target_f, f_name, p_name))
                         c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
                         conn.commit()
-                        get_cached_folders.clear()
                         st.success("✅ 更新成功！")
                         st.rerun()
                         
@@ -1015,7 +1043,6 @@ with tab_settings:
                         c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
                         c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
                         conn.commit()
-                        get_cached_folders.clear()
                         st.success("✅ 已刪除！")
                         st.rerun()
 
@@ -1028,7 +1055,6 @@ with tab_settings:
                     if new_folder_name.strip():
                         c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
                         conn.commit()
-                        get_cached_folders.clear()
                         st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
                         st.rerun()
 
