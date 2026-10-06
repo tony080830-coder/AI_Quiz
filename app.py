@@ -20,7 +20,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTExMzMzMDgsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.Y6-wSdQ4W-2k6fO7oVzx-xS078l2M8iyH24iFbbKzRMaOcXPCTTGtvXqk8RUjU-pPrW_joUTB4dDp1N1SqOWAQ"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTEyOTUwNjYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.rPkplS_BQF3SWcFfgjiclvJTzLwdx1De1OhT3NYG4ii5bsiCSml_S4UyyAqDbPb-4PkRCCKCMQM16ygMUNGbDQ"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -167,25 +167,31 @@ if '_db_schema_ready' not in st.session_state:
     except Exception:
         pass
 
-def get_all_folders():
-    try:
-        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
-        raw_rows = c.fetchall()
-        result = []
-        for r in raw_rows:
-            val = None
-            if isinstance(r, (tuple, list)):
-                val = r[0] if len(r) > 0 else None
-            elif isinstance(r, dict) or hasattr(r, 'keys'):
-                val = r.get('folder') if hasattr(r, 'get') else r['folder']
-            else:
-                try: val = r['folder']
-                except Exception: val = r[0]
-            if val and str(val).strip():
-                result.append(str(val).strip())
-        return sorted(list(set(result)))
-    except Exception:
-        return []
+# 🌟 快取資料夾與 API Key，避免在做題循環中頻繁發動雲端查詢
+def get_cached_folders():
+    if 'cached_folders' not in st.session_state or st.session_state['cached_folders'] is None:
+        try:
+            c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
+            raw_rows = c.fetchall()
+            result = []
+            for r in raw_rows:
+                val = r[0] if isinstance(r, (tuple, list)) else (r.get('folder') if isinstance(r, dict) else r['folder'])
+                if val and str(val).strip():
+                    result.append(str(val).strip())
+            st.session_state['cached_folders'] = sorted(list(set(result)))
+        except Exception:
+            st.session_state['cached_folders'] = []
+    return st.session_state['cached_folders']
+
+def get_cached_api_key():
+    if 'cached_api_key' not in st.session_state or st.session_state['cached_api_key'] is None:
+        try:
+            c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
+            res = c.fetchone()
+            st.session_state['cached_api_key'] = res['value'] if res else ""
+        except Exception:
+            st.session_state['cached_api_key'] = ""
+    return st.session_state['cached_api_key']
 
 def get_categories_by_folder(folder=None, only_star=False):
     try:
@@ -201,20 +207,8 @@ def get_categories_by_folder(folder=None, only_star=False):
         pdf_list = []
         star_map = {}
         for r in rows:
-            cat = None
-            star = 0
-            if isinstance(r, (tuple, list)):
-                cat = r[0] if len(r) > 0 else None
-                star = r[1] if len(r) > 1 else 0
-            elif isinstance(r, dict) or hasattr(r, 'keys'):
-                cat = r.get('category')
-                star = r.get('pdf_starred', 0)
-            else:
-                try:
-                    cat = r['category']
-                    star = r['pdf_starred']
-                except Exception:
-                    cat = r[0]
+            cat = r[0] if isinstance(r, (tuple, list)) else (r.get('category') if isinstance(r, dict) else r['category'])
+            star = r[1] if isinstance(r, (tuple, list)) and len(r) > 1 else (r.get('pdf_starred', 0) if isinstance(r, dict) else r.get('pdf_starred', 0))
             if cat and str(cat).strip():
                 c_str = str(cat).strip()
                 pdf_list.append(c_str)
@@ -236,14 +230,6 @@ def compress_image_to_base64(uploaded_file, max_size=(800, 800), quality=70):
     except Exception:
         encoded = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
         return f"data:{uploaded_file.type};base64,{encoded}"
-
-def get_api_key():
-    try:
-        c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
-        result = c.fetchone()
-        return result['value'] if result else ""
-    except Exception:
-        return ""
 
 def get_question_options(q):
     if 'options' in q and q['options'] and str(q['options']).strip():
@@ -284,7 +270,6 @@ def extract_text_from_pptx(file_bytes):
                 m = re.search(r'slide(\d+)\.xml', s)
                 return int(m.group(1)) if m else 0
             slide_files.sort(key=get_slide_num)
-            
             slides_text = []
             for idx, sfile in enumerate(slide_files, start=1):
                 xml_content = z.read(sfile)
@@ -301,7 +286,7 @@ def extract_text_from_pptx(file_bytes):
     except Exception as e:
         return f"[PPT 提取錯誤: {e}]"
 
-# ================= 2. 狀態管理 =================
+# ================= 1. 狀態管理與延遲批次寫入引擎 =================
 if 'current_q' not in st.session_state: st.session_state.current_q = None
 if 'answered' not in st.session_state: st.session_state.answered = False
 if 'is_correct' not in st.session_state: st.session_state.is_correct = False
@@ -316,7 +301,24 @@ if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = [
 if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
 if 'exam_skipped_ids' not in st.session_state: st.session_state.exam_skipped_ids = []
 if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs = []
+if 'pending_db_updates' not in st.session_state: st.session_state.pending_db_updates = {}
 
+# 🌟 背景同步函式：將記憶體中的錯題統計一次寫入雲端
+def flush_pending_updates():
+    if st.session_state.pending_db_updates:
+        updates = dict(st.session_state.pending_db_updates)
+        st.session_state.pending_db_updates = {}
+        try:
+            for qid, delta in updates.items():
+                if delta < 0:
+                    c.execute("UPDATE questions SET wrong_count = MAX(0, wrong_count - 1) WHERE id=?", (qid,))
+                else:
+                    c.execute("UPDATE questions SET wrong_count = wrong_count + 1 WHERE id=?", (qid,))
+            conn.commit()
+        except Exception:
+            pass
+
+# 🌟 核心突破：答題判斷完全在記憶體完成，0 延遲秒出結果，絕不呼叫遠端資料庫！
 def check_answer(selected, correct, q_id):
     st.session_state.answered = True
     st.session_state.user_selected = selected.strip()
@@ -326,18 +328,17 @@ def check_answer(selected, correct, q_id):
     if not is_right and len(selected) == 1 and correct.startswith(selected):
         is_right = True
 
-    try:
-        if is_right:
-            st.session_state.is_correct = True
-            c.execute("UPDATE questions SET wrong_count = MAX(0, wrong_count - 1) WHERE id=?", (q_id,))
-        else:
-            st.session_state.is_correct = False
-            c.execute("UPDATE questions SET wrong_count = wrong_count + 1 WHERE id=?", (q_id,))
-        conn.commit()
-    except Exception:
-        pass
+    st.session_state.is_correct = is_right
+    if is_right:
+        if q_id not in st.session_state.exam_correct_ids:
+            st.session_state.exam_correct_ids.append(q_id)
+        st.session_state.pending_db_updates[q_id] = -1
+    else:
+        if q_id not in st.session_state.exam_wrong_ids:
+            st.session_state.exam_wrong_ids.append(q_id)
+        st.session_state.pending_db_updates[q_id] = 1
 
-# ================= 3. 網頁介面開始 =================
+# ================= 2. 網頁介面開始 =================
 st.set_page_config(page_title="AI 錯題本", page_icon="📝", layout="centered")
 st.title("📝 AI 專屬錯題本系統")
 
@@ -353,12 +354,11 @@ tab_quiz, tab_review, tab_import, tab_settings = st.tabs(["🎯 開始測驗", "
 
 # ---------- 【測驗區】 ----------
 with tab_quiz:
-    folders = get_all_folders()
-    
-    if not folders and not st.session_state.exam_active and not st.session_state.exam_finished:
-        st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
-    else:
-        if not st.session_state.exam_active and not st.session_state.exam_finished:
+    if not st.session_state.exam_active and not st.session_state.exam_finished:
+        folders = get_cached_folders()
+        if not folders:
+            st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
+        else:
             col_f, col_st = st.columns([2, 1])
             with col_f:
                 selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="quiz_folder")
@@ -378,9 +378,20 @@ with tab_quiz:
 
             col_cnt, col_order = st.columns(2)
             with col_cnt:
-                q_count_option = st.selectbox("⏱️ 練習題數（零碎時間快速刷）：", ["5 題", "10 題", "20 題", "全部題目"])
+                q_count_option = st.selectbox("⏱️ 練習題數：", ["全部題目", "5 題", "10 題", "20 題"])
             with col_order:
-                q_order = st.selectbox("🔀 出題順序：", ["隨機抽題（優先抽常錯題）", "照考卷順序"])
+                q_order = st.selectbox("🔀 出題順序：", ["照考卷順序", "隨機抽題（優先抽常錯題）"])
+
+            # 🌟 指定起始題號輸入（支援從上次離開處繼續做）
+            start_q_num = 1
+            if q_order == "照考卷順序":
+                start_q_num = st.number_input(
+                    "📍 從第幾題開始做？（上次若中途離開，可直接輸入題號繼續）：",
+                    min_value=1,
+                    value=1,
+                    step=1,
+                    help="例如上次做到第 20 題中斷，這次輸入 21 即可直接從第 21 題開始接續！"
+                )
 
             if st.button("🚀 開始測驗", type="primary", use_container_width=True):
                 if not selected_pdfs:
@@ -404,18 +415,29 @@ with tab_quiz:
                         st.warning("所選條件下無任何題目！")
                     else:
                         q_pool_dicts = [dict(q) for q in q_pool]
-                        if q_count_option != "全部題目":
-                            pick_n = int(q_count_option.replace(" 題", ""))
-                            actual_pool = q_pool_dicts[:max(pick_n * 2, len(q_pool_dicts))]
-                            random.shuffle(actual_pool)
-                            st.session_state.exam_questions = actual_pool[:pick_n]
+                        total_found = len(q_pool_dicts)
+                        
+                        if q_order == "照考卷順序":
+                            start_idx = max(0, min(int(start_q_num) - 1, total_found - 1))
+                            if q_count_option != "全部題目":
+                                pick_n = int(q_count_option.replace(" 題", ""))
+                                st.session_state.exam_questions = q_pool_dicts[start_idx : start_idx + pick_n]
+                                st.session_state.exam_index = 0
+                            else:
+                                st.session_state.exam_questions = q_pool_dicts
+                                st.session_state.exam_index = start_idx
                         else:
-                            q_list = list(q_pool_dicts)
-                            if q_order != "照考卷順序":
+                            if q_count_option != "全部題目":
+                                pick_n = int(q_count_option.replace(" 題", ""))
+                                actual_pool = q_pool_dicts[:max(pick_n * 2, total_found)]
+                                random.shuffle(actual_pool)
+                                st.session_state.exam_questions = actual_pool[:pick_n]
+                            else:
+                                q_list = list(q_pool_dicts)
                                 random.shuffle(q_list)
-                            st.session_state.exam_questions = q_list
+                                st.session_state.exam_questions = q_list
+                            st.session_state.exam_index = 0
 
-                        st.session_state.exam_index = 0
                         st.session_state.exam_wrong_ids = []
                         st.session_state.exam_correct_ids = []
                         st.session_state.exam_skipped_ids = []
@@ -425,19 +447,82 @@ with tab_quiz:
                         st.session_state.answered = False
                         st.session_state.user_selected = ""
                         st.session_state.explanation = ""
+                        st.session_state.pending_db_updates = {}
                         st.rerun()
 
-        elif st.session_state.exam_active and not st.session_state.exam_finished:
-            total_q = len(st.session_state.exam_questions)
-            idx = st.session_state.exam_index
-            curr_q = st.session_state.exam_questions[idx]
+    # ---------- 測驗進行中（純記憶體秒切運算） ----------
+    elif st.session_state.exam_active and not st.session_state.exam_finished:
+        total_q = len(st.session_state.exam_questions)
+        idx = st.session_state.exam_index
+        curr_q = st.session_state.exam_questions[idx]
 
-            st.progress((idx) / total_q)
-            col_prog, col_quit = st.columns([3, 1.2])
-            with col_prog:
-                st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 對：{len(st.session_state.exam_correct_ids)} / 錯：{len(st.session_state.exam_wrong_ids)} / 略過：{len(st.session_state.exam_skipped_ids)}")
-            with col_quit:
-                if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
+        st.progress((idx + 1) / total_q)
+        col_prog, col_quit = st.columns([3, 1.2])
+        with col_prog:
+            st.caption(f"第 {idx + 1} / {total_q} 題 | 來源：{curr_q['category']} | 對：{len(st.session_state.exam_correct_ids)} / 錯：{len(st.session_state.exam_wrong_ids)} / 略過：{len(st.session_state.exam_skipped_ids)}")
+        with col_quit:
+            # 隨時結算：背景一次性同步並結算
+            if st.button("⏹️ 隨時結算", help="隨時中斷並查看目前答題報告", use_container_width=True):
+                flush_pending_updates()
+                answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
+                if answered_so_far > 0:
+                    try:
+                        c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
+                                  (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                        conn.commit()
+                    except Exception:
+                        pass
+                st.session_state.exam_active = False
+                st.session_state.exam_finished = True
+                st.rerun()
+
+        # 🌟 快速跳題傳送門（做題中隨時可跳至任意題目）
+        with st.expander(f"🔀 快速跳題傳送門（目前正在做第 {idx + 1} 題，點此展開切換）", expanded=False):
+            c_jump1, c_jump2 = st.columns([3, 1])
+            with c_jump1:
+                jump_target = st.number_input("跳至指定題號：", min_value=1, max_value=total_q, value=idx + 1, step=1, key="quiz_jump_input")
+            with c_jump2:
+                st.write("")
+                st.write("")
+                if st.button("🚀 跳轉", key="quiz_jump_btn", use_container_width=True):
+                    flush_pending_updates()
+                    st.session_state.exam_index = int(jump_target) - 1
+                    st.session_state.answered = False
+                    st.session_state.user_selected = ""
+                    st.session_state.explanation = ""
+                    st.rerun()
+
+        col_t, col_s = st.columns([4, 1.2])
+        is_q_st = bool(curr_q['is_starred'])
+        with col_t:
+            st.subheader(f"Q{idx + 1}. {curr_q['text']}")
+        with col_s:
+            if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"ex_star_{curr_q['id']}", use_container_width=True):
+                new_star = 0 if is_q_st else 1
+                c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, curr_q['id']))
+                conn.commit()
+                curr_q['is_starred'] = new_star
+                st.rerun()
+
+        options = get_question_options(curr_q)
+        correct_ans = str(curr_q['answer']).strip()
+        q_id = curr_q['id']
+
+        # ---------------- 尚未作答狀態 ----------------
+        if not st.session_state.answered:
+            for opt_idx, opt in enumerate(options):
+                if st.button(opt, key=f"ex_btn_{q_id}_{opt_idx}", use_container_width=True):
+                    check_answer(opt, correct_ans, q_id)
+                    st.rerun()
+            
+            st.write("")
+            if st.button("⏭️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
+                flush_pending_updates()
+                if q_id not in st.session_state.exam_skipped_ids:
+                    st.session_state.exam_skipped_ids.append(q_id)
+                
+                is_last = (idx + 1 >= total_q)
+                if is_last:
                     answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                     if answered_so_far > 0:
                         try:
@@ -448,42 +533,41 @@ with tab_quiz:
                             pass
                     st.session_state.exam_active = False
                     st.session_state.exam_finished = True
-                    st.rerun()
+                else:
+                    st.session_state.exam_index += 1
+                    st.session_state.answered = False
+                    st.session_state.user_selected = ""
+                    st.session_state.explanation = ""
+                st.rerun()
 
-            col_t, col_s = st.columns([4, 1.2])
-            is_q_st = bool(curr_q['is_starred'])
-            with col_t:
-                st.subheader(f"Q{idx + 1}. {curr_q['text']}")
-            with col_s:
-                if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"ex_star_{curr_q['id']}", use_container_width=True):
-                    new_star = 0 if is_q_st else 1
-                    c.execute("UPDATE questions SET is_starred=? WHERE id=?", (new_star, curr_q['id']))
-                    conn.commit()
-                    curr_q['is_starred'] = new_star
-                    st.rerun()
+        # ---------------- 已作答狀態（完整題目與選項呈現） ----------------
+        else:
+            if st.session_state.is_correct:
+                st.success("✅ 恭喜答對！")
+            else:
+                st.error(f"❌ 答錯了！正確答案是：**{correct_ans}**（你的選擇：{st.session_state.user_selected}）")
 
-            options = get_question_options(curr_q)
-            correct_ans = str(curr_q['answer']).strip()
-            q_id = curr_q['id']
-
-            if not st.session_state.answered:
-                for opt_idx, opt in enumerate(options):
-                    if st.button(opt, key=f"ex_btn_{q_id}_{opt_idx}", use_container_width=True):
-                        check_answer(opt, correct_ans, q_id)
-                        if st.session_state.is_correct:
-                            if q_id not in st.session_state.exam_correct_ids:
-                                st.session_state.exam_correct_ids.append(q_id)
-                        else:
-                            if q_id not in st.session_state.exam_wrong_ids:
-                                st.session_state.exam_wrong_ids.append(q_id)
-                        st.rerun()
+            # 🌟 完整題目選項對照表（0 延遲即時呈現）
+            st.markdown("#### 📋 題目選項完整對照：")
+            for opt_idx, opt_text in enumerate(options):
+                is_this_correct = (opt_text.strip() == correct_ans.strip()) or (len(correct_ans) == 1 and opt_text.startswith(correct_ans))
+                is_this_user_pick = (opt_text.strip() == st.session_state.user_selected)
                 
-                st.write("")
-                if st.button("⏭️️ 略過此題（非本次範圍 / 不計入成績）", key=f"skip_{q_id}", use_container_width=True):
-                    if q_id not in st.session_state.exam_skipped_ids:
-                        st.session_state.exam_skipped_ids.append(q_id)
-                    
-                    is_last = (idx + 1 >= total_q)
+                if is_this_correct:
+                    st.markdown(f"- **:green[✅ {opt_text} （正解）]**")
+                elif is_this_user_pick:
+                    st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
+                else:
+                    st.markdown(f"- <span style='color: gray;'>{opt_text}</span>", unsafe_allow_html=True)
+
+            st.divider()
+
+            col_next, col_exp = st.columns(2)
+            with col_next:
+                is_last = (idx + 1 >= total_q)
+                btn_label = "🏁 完成並結算" if is_last else "👉 下一題"
+                if st.button(btn_label, type="primary", use_container_width=True):
+                    flush_pending_updates()
                     if is_last:
                         answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
                         if answered_so_far > 0:
@@ -502,177 +586,136 @@ with tab_quiz:
                         st.session_state.explanation = ""
                     st.rerun()
 
-            else:
-                if st.session_state.is_correct:
-                    st.success("✅ 恭喜答對！")
-                else:
-                    st.error(f"❌ 答錯了！正確答案是：**{correct_ans}**（你的選擇：{st.session_state.user_selected}）")
-
-                st.markdown("#### 📋 題目選項完整對照：")
-                for opt_idx, opt_text in enumerate(options):
-                    is_this_correct = (opt_text.strip() == correct_ans.strip()) or (len(correct_ans) == 1 and opt_text.startswith(correct_ans))
-                    is_this_user_pick = (opt_text.strip() == st.session_state.user_selected)
-                    
-                    if is_this_correct:
-                        st.markdown(f"- **:green[✅ {opt_text} （正解）]**")
-                    elif is_this_user_pick:
-                        st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
+            with col_exp:
+                has_exp = bool(curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解')
+                btn_exp_title = "📖 查看詳解" if has_exp else "🧠 AI 即時分析詳解"
+                if st.button(btn_exp_title, key=f"ex_exp_{q_id}", use_container_width=True):
+                    if has_exp:
+                        st.session_state.explanation = curr_q['explanation']
                     else:
-                        st.markdown(f"- <span style='color: gray;'>{opt_text}</span>", unsafe_allow_html=True)
-
-                st.divider()
-
-                col_next, col_exp = st.columns(2)
-                with col_next:
-                    is_last = (idx + 1 >= total_q)
-                    btn_label = "🏁 完成並結算" if is_last else "👉 下一題"
-                    if st.button(btn_label, type="primary", use_container_width=True):
-                        if is_last:
-                            answered_so_far = len(st.session_state.exam_correct_ids) + len(st.session_state.exam_wrong_ids)
-                            if answered_so_far > 0:
+                        api_key = get_cached_api_key()
+                        if not api_key:
+                            st.error("請至「⚙️ 設定與管理」輸入 API Key！")
+                        else:
+                            with st.spinner("AI 正在撰寫繁體中文深度詳解..."):
                                 try:
-                                    c.execute("INSERT INTO exam_history (category, wrong_ids, correct_ids) VALUES (?, ?, ?)",
-                                              (", ".join(st.session_state.exam_tested_pdfs), json.dumps(st.session_state.exam_wrong_ids), json.dumps(st.session_state.exam_correct_ids)))
+                                    genai.configure(api_key=api_key)
+                                    model = genai.GenerativeModel('gemini-3.8-flash')
+                                    prompt = (
+                                        f"題目：{curr_q['text']}\n"
+                                        f"選項：{options}\n"
+                                        f"正確答案：{correct_ans}\n\n"
+                                        "【作答規範】\n"
+                                        "1. 無論題目原文是英文還是中文，詳解一律必須使用「繁體中文（台灣醫學常用語）」撰寫。\n"
+                                        "2. 請點出關鍵核心考點與專有名詞中英對照。\n"
+                                        "3. 詳細說明正解正確之原因，並逐一剖析其他錯誤選項錯在哪裡。"
+                                    )
+                                    resp = model.generate_content(prompt, request_options={"timeout": 60})
+                                    new_exp = resp.text.strip()
+                                    c.execute("UPDATE questions SET explanation=? WHERE id=?", (new_exp, q_id))
                                     conn.commit()
-                                except Exception:
-                                    pass
-                            st.session_state.exam_active = False
-                            st.session_state.exam_finished = True
-                        else:
-                            st.session_state.exam_index += 1
-                            st.session_state.answered = False
-                            st.session_state.user_selected = ""
-                            st.session_state.explanation = ""
-                        st.rerun()
+                                    curr_q['explanation'] = new_exp
+                                    st.session_state.explanation = new_exp
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"AI 生成詳解失敗：{e}")
 
-                with col_exp:
-                    has_exp = bool(curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解')
-                    btn_exp_title = "📖 查看詳解" if has_exp else "🧠 AI 即時分析詳解"
-                    if st.button(btn_exp_title, key=f"ex_exp_{q_id}", use_container_width=True):
-                        if has_exp:
-                            st.session_state.explanation = curr_q['explanation']
-                        else:
-                            api_key = get_api_key()
-                            if not api_key:
-                                st.error("請至「⚙️ 設定與管理」輸入 API Key！")
-                            else:
-                                with st.spinner("AI 正在撰寫繁體中文深度詳解..."):
-                                    try:
-                                        genai.configure(api_key=api_key)
-                                        model = genai.GenerativeModel('gemini-3.8-flash')
-                                        prompt = (
-                                            f"題目：{curr_q['text']}\n"
-                                            f"選項：{options}\n"
-                                            f"正確答案：{correct_ans}\n\n"
-                                            "【作答規範】\n"
-                                            "1. 無論題目原文是英文還是中文，詳解一律必須使用「繁體中文（台灣醫學常用語）」撰寫。\n"
-                                            "2. 請點出關鍵核心考點與專有名詞中英對照。\n"
-                                            "3. 詳細說明正解正確之原因，並逐一剖析其他錯誤選項錯在哪裡。"
-                                        )
-                                        resp = model.generate_content(prompt, request_options={"timeout": 60})
-                                        new_exp = resp.text.strip()
-                                        c.execute("UPDATE questions SET explanation=? WHERE id=?", (new_exp, q_id))
-                                        conn.commit()
-                                        curr_q['explanation'] = new_exp
-                                        st.session_state.explanation = new_exp
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"AI 生成詳解失敗：{e}")
+            if st.session_state.explanation:
+                st.info(st.session_state.explanation)
+            elif curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解':
+                st.info(curr_q['explanation'])
 
-                if st.session_state.explanation:
-                    st.info(st.session_state.explanation)
-                elif curr_q['explanation'] and curr_q['explanation'].strip() and curr_q['explanation'] != '無提供詳解':
-                    st.info(curr_q['explanation'])
+            if 'explanation_image' in curr_q and curr_q['explanation_image'] and curr_q['explanation_image'].strip():
+                st.markdown("**📸 個人筆記/解題截圖：**")
+                st.image(curr_q['explanation_image'], use_container_width=True)
 
-                if 'explanation_image' in curr_q and curr_q['explanation_image'] and curr_q['explanation_image'].strip():
-                    st.markdown("**📸 個人筆記/解題截圖：**")
-                    st.image(curr_q['explanation_image'], use_container_width=True)
-
-                with st.expander("✏ 手動編輯詳解 / 上傳筆記截圖 (極速秒存，不耗 AI 額度)"):
-                    custom_exp_text = st.text_area("輸入文字詳解或口訣重點：", value=curr_q['explanation'] if curr_q['explanation'] and curr_q['explanation'] != '無提供詳解' else "", key=f"custom_exp_txt_{q_id}")
-                    uploaded_note_img = st.file_uploader("上傳解題筆記/課本截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"note_img_{q_id}")
-                    
-                    if st.button("💾 儲存自訂筆記至雲端", key=f"btn_save_note_{q_id}", type="primary"):
-                        img_b64 = curr_q['explanation_image'] if 'explanation_image' in curr_q else ""
-                        if uploaded_note_img:
-                            img_b64 = compress_image_to_base64(uploaded_note_img)
-                        
-                        c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (custom_exp_text.strip(), img_b64, q_id))
-                        conn.commit()
-                        
-                        curr_q['explanation'] = custom_exp_text.strip()
-                        curr_q['explanation_image'] = img_b64
-                        st.session_state.explanation = custom_exp_text.strip()
-                        st.toast("⚡ 已極速儲存！")
-                        st.rerun()
-
-        elif st.session_state.exam_finished:
-            st.balloons()
-            st.success("🎉 測驗已結束！本次練習總結如下：")
-
-            curr_wrong = set(st.session_state.exam_wrong_ids)
-            curr_correct = set(st.session_state.exam_correct_ids)
-            skipped_cnt = len(st.session_state.exam_skipped_ids)
-            actual_tested = len(curr_wrong) + len(curr_correct)
-            score = (len(curr_correct) / actual_tested * 100) if actual_tested > 0 else 0
-
-            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("實作答對率", f"{score:.1f}%")
-            col_m2.metric("🟢 答對題數", f"{len(curr_correct)} 題")
-            col_m3.metric("🔴 答錯題數", f"{len(curr_wrong)} 題")
-            col_m4.metric("⏭️ 略過題數", f"{skipped_cnt} 題")
-
-            st.divider()
-
-            if curr_wrong:
-                if st.button("⭐ 一鍵將本次答錯的題目加入星號收藏", type="primary"):
-                    placeholders = ','.join(['?'] * len(curr_wrong))
-                    c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({placeholders})", tuple(curr_wrong))
-                    conn.commit()
-                    st.toast("✅ 本次錯題已全部加為星號收藏！")
-
-                st.subheader(f"❌ 本次答錯檢討 ({len(curr_wrong)} 題)")
-                mem_q_map = {q['id']: q for q in st.session_state.exam_questions}
+            with st.expander("✏ 手動編輯詳解 / 上傳筆記截圖 (極速秒存，不耗 AI 額度)"):
+                custom_exp_text = st.text_area("輸入文字詳解或口訣重點：", value=curr_q['explanation'] if curr_q['explanation'] and curr_q['explanation'] != '無提供詳解' else "", key=f"custom_exp_txt_{q_id}")
+                uploaded_note_img = st.file_uploader("上傳解題筆記/課本截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"note_img_{q_id}")
                 
-                for qid in curr_wrong:
-                    q_data = mem_q_map.get(qid)
-                    if q_data:
-                        opts_review = get_question_options(q_data)
-                        with st.expander(f"[{q_data['category']}] {q_data['text'][:30]}..."):
-                            st.markdown(f"**題目**：{q_data['text']}")
-                            for i, opt_item in enumerate(opts_review):
-                                label = chr(65 + i) if i < 26 else str(i + 1)
-                                is_ans = (opt_item.strip() == str(q_data['answer']).strip()) or (len(str(q_data['answer']).strip()) == 1 and opt_item.startswith(str(q_data['answer']).strip()))
-                                if is_ans:
-                                    st.markdown(f"- **:green[({label}) {opt_item} （正解）]**")
-                                else:
-                                    st.markdown(f"- ({label}) {opt_item}")
-                            st.markdown(f"✅ **正確答案**：`{q_data['answer']}`")
-                            exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
-                            st.caption(f"💡 解析：{exp}")
-                            if 'explanation_image' in q_data and q_data['explanation_image'] and q_data['explanation_image'].strip():
-                                st.image(q_data['explanation_image'], use_container_width=True)
-            else:
-                st.info("太棒了！本次測驗全對，零錯題！")
+                if st.button("💾 儲存自訂筆記至雲端", key=f"btn_save_note_{q_id}", type="primary"):
+                    img_b64 = curr_q['explanation_image'] if 'explanation_image' in curr_q else ""
+                    if uploaded_note_img:
+                        img_b64 = compress_image_to_base64(uploaded_note_img)
+                    
+                    c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (custom_exp_text.strip(), img_b64, q_id))
+                    conn.commit()
+                    
+                    curr_q['explanation'] = custom_exp_text.strip()
+                    curr_q['explanation_image'] = img_b64
+                    st.session_state.explanation = custom_exp_text.strip()
+                    st.toast("⚡ 已極速儲存！")
+                    st.rerun()
 
-            if st.button("🔄 繼續新的練習 / 重新開始", use_container_width=True):
-                st.session_state.exam_active = False
-                st.session_state.exam_finished = False
-                st.session_state.exam_questions = []
-                st.session_state.exam_index = 0
-                st.session_state.exam_wrong_ids = []
-                st.session_state.exam_correct_ids = []
-                st.session_state.exam_skipped_ids = []
-                st.session_state.user_selected = ""
-                st.rerun()
+    # ---------- 結算成果頁 ----------
+    elif st.session_state.exam_finished:
+        st.balloons()
+        st.success("🎉 測驗已結束！本次練習總結如下：")
 
-# ---------- 【錯題總覽區】 ----------
+        curr_wrong = set(st.session_state.exam_wrong_ids)
+        curr_correct = set(st.session_state.exam_correct_ids)
+        skipped_cnt = len(st.session_state.exam_skipped_ids)
+        actual_tested = len(curr_wrong) + len(curr_correct)
+        score = (len(curr_correct) / actual_tested * 100) if actual_tested > 0 else 0
+
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("實作答對率", f"{score:.1f}%")
+        col_m2.metric("🟢 答對題數", f"{len(curr_correct)} 題")
+        col_m3.metric("🔴 答錯題數", f"{len(curr_wrong)} 題")
+        col_m4.metric("⏭️ 略過題數", f"{skipped_cnt} 題")
+
+        st.divider()
+
+        if curr_wrong:
+            if st.button("⭐ 一鍵將本次答錯的題目加入星號收藏", type="primary"):
+                placeholders = ','.join(['?'] * len(curr_wrong))
+                c.execute(f"UPDATE questions SET is_starred=1 WHERE id IN ({placeholders})", tuple(curr_wrong))
+                conn.commit()
+                st.toast("✅ 本次錯題已全部加為星號收藏！")
+
+            st.subheader(f"❌ 本次答錯檢討 ({len(curr_wrong)} 題)")
+            mem_q_map = {q['id']: q for q in st.session_state.exam_questions}
+            
+            for qid in curr_wrong:
+                q_data = mem_q_map.get(qid)
+                if q_data:
+                    opts_review = get_question_options(q_data)
+                    with st.expander(f"[{q_data['category']}] {q_data['text'][:30]}..."):
+                        st.markdown(f"**題目**：{q_data['text']}")
+                        for i, opt_item in enumerate(opts_review):
+                            label = chr(65 + i) if i < 26 else str(i + 1)
+                            is_ans = (opt_item.strip() == str(q_data['answer']).strip()) or (len(str(q_data['answer']).strip()) == 1 and opt_item.startswith(str(q_data['answer']).strip()))
+                            if is_ans:
+                                st.markdown(f"- **:green[({label}) {opt_item} （正解）]**")
+                            else:
+                                st.markdown(f"- ({label}) {opt_item}")
+                        st.markdown(f"✅ **正確答案**：`{q_data['answer']}`")
+                        exp = q_data['explanation'] if q_data['explanation'] else "尚未生成詳解"
+                        st.caption(f"💡 解析：{exp}")
+                        if 'explanation_image' in q_data and q_data['explanation_image'] and q_data['explanation_image'].strip():
+                            st.image(q_data['explanation_image'], use_container_width=True)
+        else:
+            st.info("太棒了！本次測驗全對，零錯題！")
+
+        if st.button("🔄 繼續新的練習 / 重新開始", use_container_width=True):
+            st.session_state.exam_active = False
+            st.session_state.exam_finished = False
+            st.session_state.exam_questions = []
+            st.session_state.exam_index = 0
+            st.session_state.exam_wrong_ids = []
+            st.session_state.exam_correct_ids = []
+            st.session_state.exam_skipped_ids = []
+            st.session_state.user_selected = ""
+            st.session_state.pending_db_updates = {}
+            st.rerun()
+
+# ---------- 【錯題總覽區 (測驗期間休眠)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
-        st.info("⚡ 測驗或查看報告中，背景查詢已自動暫停以確保零延遲。點擊「繼續新的練習 / 重新開始」回到首頁後即可查閱完整題庫。")
+        st.info("⚡ 測驗或查看報告中，背景查詢已自動暫停以確保刷題零卡頓。點擊「繼續新的練習 / 重新開始」回到首頁後即可查閱完整題庫。")
     else:
         st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
-        folders = get_all_folders()
+        folders = get_cached_folders()
         if not folders:
             st.info("目前沒有題庫資料。")
         else:
@@ -746,170 +789,233 @@ with tab_review:
                                     st.toast("✅ 筆記截圖已移除！")
                                     st.rerun()
 
-# ---------- 【匯入區：黃金 10 頁穩健批次 + 即時透明題目預覽】 ----------
+# ---------- 【匯入區 (測驗期間休眠)】 ----------
 with tab_import:
-    st.markdown("### 🤖 智慧題庫匯入")
-    existing_folders = get_all_folders()
-    
-    folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
-    if folder_choice == "-- ➕ 新增資料夾 --":
-        target_folder = st.text_input("輸入新資料夾名稱", "生化")
+    if st.session_state.exam_active or st.session_state.exam_finished:
+        st.info("⚡ 測驗或查看報告中，匯入面板已自動休眠以保持刷題零卡頓。")
     else:
-        target_folder = folder_choice
+        st.markdown("### 🤖 智慧題庫匯入")
+        existing_folders = get_cached_folders()
         
-    import_mode = st.radio("選擇匯入方式：", ["📁 模式一：檔案直接上傳 (PDF, Word, PPTX, TXT)", "📋 模式二：直接貼上題目純文字 (快速補抓少量題目)"])
-    
-    parse_prompt = (
-        "請從所提供內容中提取出所有的「選擇題」（包含單選、多選、A~E 或 A~F 多個選項、是非題等）。\n"
-        "【嚴格提取規範】\n"
-        "1. text（題目）與 options（選項陣列）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
-        "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
-        "3. answer：若內容中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
-        "4. explanation：若內容本身有附解答說明則填入簡要說明，若無請留空字串 \"\" 即可。\n"
-        "5. 若本頁面中「沒有任何選擇題」，請直接回傳空陣列 [] 即可。\n"
-        "6. 格式：嚴格以標準 JSON 陣列輸出，不要包含任何額外說明文字。\n"
-        '範例格式：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
-    )
-
-    if import_mode.startswith("📁 模式一"):
-        uploaded_file = st.file_uploader(
-            "上傳題目檔案 (支援任意頁數的 PDF、Word、PPTX、TXT)", 
-            type=["pdf", "docx", "pptx", "txt", "md"]
+        folder_choice = st.selectbox("📂 選擇目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
+        if folder_choice == "-- ➕ 新增資料夾 --":
+            target_folder = st.text_input("輸入新資料夾名稱", "生化")
+        else:
+            target_folder = folder_choice
+            
+        import_mode = st.radio("選擇匯入方式：", ["📁 模式一：檔案直接上傳 (PDF, Word, PPTX, TXT)", "📋 模式二：直接貼上題目純文字 (快速補抓少量題目)"])
+        
+        parse_prompt = (
+            "請從所提供內容中提取出所有的「選擇題」（包含單選、多選、A~E 或 A~F 多個選項、是非題等）。\n"
+            "【嚴格提取規範】\n"
+            "1. text（題目）與 options（選項陣列）：完整保留原文（若為英文請保留英文，切勿翻譯題幹）。\n"
+            "2. options：請務必完整收錄該題的所有選項（若有 5 個選項 A~E 請列出 5 個，切勿省略）。\n"
+            "3. answer：若內容中有標明正解請直接填入，若無請推導出正確選項字母或文字。\n"
+            "4. explanation：若內容本身有附解答說明則填入簡要說明，若無請留空字串 \"\" 即可。\n"
+            "5. 若本頁面中「沒有任何選擇題」，請直接回傳空陣列 [] 即可。\n"
+            "6. 格式：嚴格以標準 JSON 陣列輸出，不要包含任何額外說明文字。\n"
+            '範例格式：[{"text":"What is...","options":["A","B","C","D","E"],"answer":"A","explanation":""}]'
         )
-        
-        default_name = uploaded_file.name if uploaded_file else ""
-        col_n, col_p = st.columns([2, 1])
-        with col_n:
-            custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
-        with col_p:
-            page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：1-10 或 11-20", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
-        
-        if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
-            api_key = get_api_key()
-            if not api_key: 
-                st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
-            else:
-                fname = uploaded_file.name.lower()
-                file_bytes = uploaded_file.getvalue()
-                final_name = custom_name.strip() if custom_name else uploaded_file.name
-                
-                genai.configure(api_key=api_key)
-                # 維持使用 gemini-3.8-flash 模型
-                model = genai.GenerativeModel('gemini-3.8-flash')
-                
-                batches = []
-                
-                if fname.endswith('.pdf'):
-                    if not HAS_PYPDF:
-                        st.error("⚠️ 尚未安裝 `pypdf` 套件！請在 GitHub 的 `requirements.txt` 新增一行 `pypdf`。")
-                        st.stop()
-                    
-                    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-                    total_pdf_pages = len(reader.pages)
-                    
-                    start_page_limit = 0
-                    end_page_limit = total_pdf_pages
-                    if page_range_str.strip():
-                        try:
-                            parts = page_range_str.strip().split('-')
-                            start_page_limit = max(0, int(parts[0].strip()) - 1)
-                            end_page_limit = min(total_pdf_pages, int(parts[1].strip()))
-                        except Exception:
-                            st.warning("⚠️ 頁數格式不正確（例如請填寫：1-10），將自動解析全部頁數。")
-                            start_page_limit = 0
-                            end_page_limit = total_pdf_pages
 
-                    actual_page_count = end_page_limit - start_page_limit
-                    
-                    # 🌟 穩健設定：每批固定 10 頁，完全杜絕 60 秒 504 截斷超時
-                    PAGES_PER_BATCH = 10
-                    
-                    st.info(f"📖 目標範圍：第 **{start_page_limit + 1} ~ {end_page_limit}** 頁（共 {actual_page_count} 頁），系統以每批 10 頁極速安全解析中...")
-                    
-                    for start_p in range(start_page_limit, end_page_limit, PAGES_PER_BATCH):
-                        end_p = min(start_p + PAGES_PER_BATCH, end_page_limit)
-                        
-                        batch_text = ""
-                        for p_i in range(start_p, end_p):
-                            t = reader.pages[p_i].extract_text() or ""
-                            if t.strip():
-                                batch_text += f"\n--- Page {p_i+1} ---\n" + t
-                        
-                        if len(batch_text.strip()) > 100:
-                            batches.append({
-                                "title": f"第 {start_p+1} ~ {end_p} 頁 (文字極速提取)",
-                                "content": [parse_prompt, f"【以下為檔案第 {start_p+1} ~ {end_p} 頁文字內容】：\n\n{batch_text}"]
-                            })
-                        else:
-                            writer = pypdf.PdfWriter()
-                            for p_i in range(start_p, end_p):
-                                writer.add_page(reader.pages[p_i])
-                            sub_buf = io.BytesIO()
-                            writer.write(sub_buf)
-                            batches.append({
-                                "title": f"第 {start_p+1} ~ {end_p} 頁 (圖文光學解析)",
-                                "content": [parse_prompt, {"mime_type": "application/pdf", "data": sub_buf.getvalue()}]
-                            })
-                
-                elif fname.endswith('.docx'):
-                    doc_text = extract_text_from_docx(file_bytes)
-                    if not doc_text.strip(): st.error("Word 文件空白！"); st.stop()
-                    batches.append({"title": "Word 全文", "content": [parse_prompt, f"【Word 內容】：\n\n{doc_text}"]})
-                    
-                elif fname.endswith('.pptx'):
-                    ppt_text = extract_text_from_pptx(file_bytes)
-                    if not ppt_text.strip(): st.error("PPT 簡報空白！"); st.stop()
-                    batches.append({"title": "PPT 全文", "content": [parse_prompt, f"【PPT 內容】：\n\n{ppt_text}"]})
-                    
+        if import_mode.startswith("📁 模式一"):
+            uploaded_file = st.file_uploader(
+                "上傳題目檔案 (支援任意頁數的 PDF、Word、PPTX、TXT)", 
+                type=["pdf", "docx", "pptx", "txt", "md"]
+            )
+            
+            default_name = uploaded_file.name if uploaded_file else ""
+            col_n, col_p = st.columns([2, 1])
+            with col_n:
+                custom_name = st.text_input("📄 編輯匯入後的考卷/講義名稱：", value=default_name)
+            with col_p:
+                page_range_str = st.text_input("🎯 指定頁數範圍 (選填)", placeholder="例如：1-10 或 11-20", help="平常留空代表解析整份文件；若某幾頁被略過，在此填寫即可只補跑該區間並自動合併！")
+            
+            if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
+                api_key = get_cached_api_key()
+                if not api_key: 
+                    st.error("請先到「⚙️ 設定與管理」輸入 API Key！")
                 else:
-                    try: txt = file_bytes.decode('utf-8')
-                    except UnicodeDecodeError: txt = file_bytes.decode('big5', errors='ignore')
-                    batches.append({"title": "文字全文", "content": [parse_prompt, f"【文字內容】：\n\n{txt}"]})
+                    fname = uploaded_file.name.lower()
+                    file_bytes = uploaded_file.getvalue()
+                    final_name = custom_name.strip() if custom_name else uploaded_file.name
+                    
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel('gemini-3.8-flash')
+                    
+                    batches = []
+                    
+                    if fname.endswith('.pdf'):
+                        if not HAS_PYPDF:
+                            st.error("⚠️ 尚未安裝 `pypdf` 套件！請在 GitHub 的 `requirements.txt` 新增一行 `pypdf`。")
+                            st.stop()
+                        
+                        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+                        total_pdf_pages = len(reader.pages)
+                        
+                        start_page_limit = 0
+                        end_page_limit = total_pdf_pages
+                        if page_range_str.strip():
+                            try:
+                                parts = page_range_str.strip().split('-')
+                                start_page_limit = max(0, int(parts[0].strip()) - 1)
+                                end_page_limit = min(total_pdf_pages, int(parts[1].strip()))
+                            except Exception:
+                                st.warning("⚠️ 頁數格式不正確（例如請填寫：1-10），將自動解析全部頁數。")
+                                start_page_limit = 0
+                                end_page_limit = total_pdf_pages
 
-                prog_bar = st.progress(0.0)
-                status_box = st.empty()
-                total_batches = len(batches)
-                total_imported = 0
-                all_imported_summary = []
-                
-                for b_idx, b_info in enumerate(batches):
-                    status_box.markdown(f"⏳ **正在處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
-                    
-                    max_retries = 3
-                    response = None
-                    for attempt in range(max_retries):
-                        try:
-                            response = model.generate_content(b_info['content'], request_options={"timeout": 90})
-                            break
-                        except Exception as e:
-                            if "429" in str(e) and attempt < max_retries - 1:
-                                status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
-                                time.sleep(60)
-                            elif ("504" in str(e) or "Deadline" in str(e)) and attempt < max_retries - 1:
-                                status_box.warning(f"⏳ 遇伺服器暫態延遲，重試該批次中... ({attempt+1}/{max_retries})")
-                                time.sleep(3)
+                        actual_page_count = end_page_limit - start_page_limit
+                        PAGES_PER_BATCH = 10
+                        
+                        st.info(f"📖 目標範圍：第 **{start_page_limit + 1} ~ {end_page_limit}** 頁（共 {actual_page_count} 頁），系統以每批 10 頁極速安全解析中...")
+                        
+                        for start_p in range(start_page_limit, end_page_limit, PAGES_PER_BATCH):
+                            end_p = min(start_p + PAGES_PER_BATCH, end_page_limit)
+                            
+                            batch_text = ""
+                            for p_i in range(start_p, end_p):
+                                t = reader.pages[p_i].extract_text() or ""
+                                if t.strip():
+                                    batch_text += f"\n--- Page {p_i+1} ---\n" + t
+                            
+                            if len(batch_text.strip()) > 100:
+                                batches.append({
+                                    "title": f"第 {start_p+1} ~ {end_p} 頁 (文字極速提取)",
+                                    "content": [parse_prompt, f"【以下為檔案第 {start_p+1} ~ {end_p} 頁文字內容】：\n\n{batch_text}"]
+                                })
                             else:
-                                st.warning(f"⚠️ {b_info['title']} 略過：{e}")
-                                break
+                                writer = pypdf.PdfWriter()
+                                for p_i in range(start_p, end_p):
+                                    writer.add_page(reader.pages[p_i])
+                                sub_buf = io.BytesIO()
+                                writer.write(sub_buf)
+                                batches.append({
+                                    "title": f"第 {start_p+1} ~ {end_p} 頁 (圖文光學解析)",
+                                    "content": [parse_prompt, {"mime_type": "application/pdf", "data": sub_buf.getvalue()}]
+                                })
                     
-                    if response and response.text:
+                    elif fname.endswith('.docx'):
+                        doc_text = extract_text_from_docx(file_bytes)
+                        if not doc_text.strip(): st.error("Word 文件空白！"); st.stop()
+                        batches.append({"title": "Word 全文", "content": [parse_prompt, f"【Word 內容】：\n\n{doc_text}"]})
+                        
+                    elif fname.endswith('.pptx'):
+                        ppt_text = extract_text_from_pptx(file_bytes)
+                        if not ppt_text.strip(): st.error("PPT 簡報空白！"); st.stop()
+                        batches.append({"title": "PPT 全文", "content": [parse_prompt, f"【PPT 內容】：\n\n{ppt_text}"]})
+                        
+                    else:
+                        try: txt = file_bytes.decode('utf-8')
+                        except UnicodeDecodeError: txt = file_bytes.decode('big5', errors='ignore')
+                        batches.append({"title": "文字全文", "content": [parse_prompt, f"【文字內容】：\n\n{txt}"]})
+
+                    prog_bar = st.progress(0.0)
+                    status_box = st.empty()
+                    total_batches = len(batches)
+                    total_imported = 0
+                    all_imported_summary = []
+                    
+                    for b_idx, b_info in enumerate(batches):
+                        status_box.markdown(f"⏳ **正在處理 [{b_idx+1}/{total_batches}] {b_info['title']}**（目前已成功抓取 **{total_imported}** 題）...")
+                        
+                        max_retries = 3
+                        response = None
+                        for attempt in range(max_retries):
+                            try:
+                                response = model.generate_content(b_info['content'], request_options={"timeout": 90})
+                                break
+                            except Exception as e:
+                                if "429" in str(e) and attempt < max_retries - 1:
+                                    status_box.warning(f"⏳ 遇 API 頻率限制，等待 60 秒... ({attempt+1}/{max_retries})")
+                                    time.sleep(60)
+                                elif ("504" in str(e) or "Deadline" in str(e)) and attempt < max_retries - 1:
+                                    status_box.warning(f"⏳ 遇伺服器暫態延遲，重試該批次中... ({attempt+1}/{max_retries})")
+                                    time.sleep(3)
+                                else:
+                                    st.warning(f"⚠️ {b_info['title']} 略過：{e}")
+                                    break
+                        
+                        if response and response.text:
+                            try:
+                                raw_text = response.text.strip()
+                                match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
+                                clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
+                                chunk_questions = json.loads(clean_json) if clean_json and clean_json != "[]" else []
+                                
+                                if chunk_questions:
+                                    with st.expander(f"📋 {b_info['title']} 成功抓取 {len(chunk_questions)} 題 (點此展開看明細)", expanded=True):
+                                        for q_sub_idx, nq in enumerate(chunk_questions, 1):
+                                            current_q_num = total_imported + q_sub_idx
+                                            q_txt = nq.get('text', '')
+                                            raw_opts = nq.get('options', [])
+                                            cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                            ans_txt = str(nq.get('answer', '')).strip()
+                                            
+                                            st.markdown(f"**第 {current_q_num} 題**：{q_txt}")
+                                            st.caption(f"選項：{', '.join(cleaned_opts)}  |  正解：`{ans_txt}`")
+                                            
+                                            opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
+                                            o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
+                                            o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
+                                            o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
+                                            o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
+                                            
+                                            c.execute(
+                                                "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                                (target_folder, final_name, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
+                                            )
+                                            all_imported_summary.append({"num": current_q_num, "text": q_txt, "answer": ans_txt})
+                                    
+                                    conn.commit()
+                                    total_imported += len(chunk_questions)
+                            except Exception:
+                                pass
+                        
+                        prog_bar.progress((b_idx + 1) / total_batches)
+                        time.sleep(1.5)
+                    
+                    status_box.empty()
+                    prog_bar.empty()
+                    st.session_state['cached_folders'] = None
+                    if total_imported > 0:
+                        st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                        with st.expander("🔍 檢視本次完整匯入題目總覽清單", expanded=False):
+                            for item in all_imported_summary:
+                                st.write(f"**第 {item['num']} 題**：{item['text']} (答案：`{item['answer']}`)")
+                    else:
+                        st.warning("處理完畢，但未在檔案所選範圍中找到符合標準格式的選擇題。")
+
+        else:
+            st.info("💡 **文字貼上模式**：在 PDF 中選取未匯入的頁數文字直接貼上，免重傳檔案，瞬間追加！")
+            pname = st.text_input("📄 考卷/講義名稱 (務必填寫相同名稱以自動追加)：", value="CH15.pdf")
+            ptext = st.text_area("請在此貼上題目文字：", height=250, placeholder="例如：\n1. What is...\nA. ...\nB. ...")
+            
+            if st.button("🚀 解析貼上內容並匯入", type="primary") and ptext.strip():
+                api_key = get_cached_api_key()
+                if not api_key:
+                    st.error("請至「⚙️ 設定與管理」輸入 API Key！")
+                else:
+                    with st.spinner("AI 正在提取純文字題目中 (約需 5~10 秒)..."):
                         try:
+                            genai.configure(api_key=api_key)
+                            model = genai.GenerativeModel('gemini-3.8-flash')
+                            response = model.generate_content([parse_prompt, f"【以下為題目文字】：\n\n{ptext}"], request_options={"timeout": 120})
+                            
                             raw_text = response.text.strip()
                             match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
                             clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
-                            chunk_questions = json.loads(clean_json) if clean_json and clean_json != "[]" else []
+                            new_questions = json.loads(clean_json)
+                            final_pname = pname.strip() if pname.strip() else "未命名考卷"
                             
-                            if chunk_questions:
-                                # 🌟 即時將這批抓到的題目清楚展開呈現給你看！
-                                with st.expander(f"📋 {b_info['title']} 成功抓取 {len(chunk_questions)} 題 (點此展開看明細)", expanded=True):
-                                    for q_sub_idx, nq in enumerate(chunk_questions, 1):
-                                        current_q_num = total_imported + q_sub_idx
+                            if new_questions:
+                                with st.expander(f"📋 成功抓取 {len(new_questions)} 題明細", expanded=True):
+                                    for q_idx, nq in enumerate(new_questions, 1):
                                         q_txt = nq.get('text', '')
                                         raw_opts = nq.get('options', [])
                                         cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
                                         ans_txt = str(nq.get('answer', '')).strip()
                                         
-                                        st.markdown(f"**第 {current_q_num} 題**：{q_txt}")
+                                        st.markdown(f"**第 {q_idx} 題**：{q_txt}")
                                         st.caption(f"選項：{', '.join(cleaned_opts)}  |  正解：`{ans_txt}`")
                                         
                                         opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
@@ -920,87 +1026,28 @@ with tab_import:
                                         
                                         c.execute(
                                             "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                            (target_folder, final_name, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
+                                            (target_folder, final_pname, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
                                         )
-                                        all_imported_summary.append({"num": current_q_num, "text": q_txt, "answer": ans_txt})
-                                
                                 conn.commit()
-                                total_imported += len(chunk_questions)
-                        except Exception:
-                            pass
-                    
-                    prog_bar.progress((b_idx + 1) / total_batches)
-                    time.sleep(1.5)
-                
-                status_box.empty()
-                prog_bar.empty()
-                if total_imported > 0:
-                    st.success(f"🎉 處理完畢！成功將 **{total_imported}** 題追加存入「{target_folder} / {final_name}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
-                    with st.expander("🔍 檢視本次完整匯入題目總覽清單", expanded=False):
-                        for item in all_imported_summary:
-                            st.write(f"**第 {item['num']} 題**：{item['text']} (答案：`{item['answer']}`)")
-                else:
-                    st.warning("處理完畢，但未在檔案所選範圍中找到符合標準格式的選擇題。")
+                                st.session_state['cached_folders'] = None
+                                st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
+                        except Exception as e:
+                            st.error(f"解析失敗，詳細錯誤：{e}")
 
-    else:
-        st.info("💡 **文字貼上模式**：在 PDF 中選取未匯入的頁數文字直接貼上，免重傳檔案，瞬間追加！")
-        pname = st.text_input("📄 考卷/講義名稱 (務必填寫相同名稱以自動追加)：", value="CH15.pdf")
-        ptext = st.text_area("請在此貼上題目文字：", height=250, placeholder="例如：\n1. What is...\nA. ...\nB. ...")
-        
-        if st.button("🚀 解析貼上內容並匯入", type="primary") and ptext.strip():
-            api_key = get_api_key()
-            if not api_key:
-                st.error("請至「⚙️ 設定與管理」輸入 API Key！")
-            else:
-                with st.spinner("AI 正在提取純文字題目中 (約需 5~10 秒)..."):
-                    try:
-                        genai.configure(api_key=api_key)
-                        model = genai.GenerativeModel('gemini-3.8-flash')
-                        response = model.generate_content([parse_prompt, f"【以下為題目文字】：\n\n{ptext}"], request_options={"timeout": 120})
-                        
-                        raw_text = response.text.strip()
-                        match = re.search(r'\[\s*\{.*\}\s*\]', raw_text, re.DOTALL)
-                        clean_json = match.group(0) if match else raw_text.replace('```json', '').replace('```', '').strip()
-                        new_questions = json.loads(clean_json)
-                        final_pname = pname.strip() if pname.strip() else "未命名考卷"
-                        
-                        if new_questions:
-                            with st.expander(f"📋 成功抓取 {len(new_questions)} 題明細", expanded=True):
-                                for q_idx, nq in enumerate(new_questions, 1):
-                                    q_txt = nq.get('text', '')
-                                    raw_opts = nq.get('options', [])
-                                    cleaned_opts = [str(o).strip() for o in raw_opts if str(o).strip()]
-                                    ans_txt = str(nq.get('answer', '')).strip()
-                                    
-                                    st.markdown(f"**第 {q_idx} 題**：{q_txt}")
-                                    st.caption(f"選項：{', '.join(cleaned_opts)}  |  正解：`{ans_txt}`")
-                                    
-                                    opts_json = json.dumps(cleaned_opts, ensure_ascii=False)
-                                    o1 = cleaned_opts[0] if len(cleaned_opts) > 0 else ""
-                                    o2 = cleaned_opts[1] if len(cleaned_opts) > 1 else ""
-                                    o3 = cleaned_opts[2] if len(cleaned_opts) > 2 else ""
-                                    o4 = cleaned_opts[3] if len(cleaned_opts) > 3 else ""
-                                    
-                                    c.execute(
-                                        "INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                        (target_folder, final_pname, q_txt, o1, o2, o3, o4, opts_json, ans_txt, nq.get('explanation', ''))
-                                    )
-                            conn.commit()
-                            st.success(f"🎉 成功將 {len(new_questions)} 題追加匯入至「{target_folder} / {final_pname}」！" + (" (已即時存入 Turso 雲端)" if IS_CLOUD else ""))
-                    except Exception as e:
-                        st.error(f"解析失敗，詳細錯誤：{e}")
-
-# ---------- 【設定與管理區】 ----------
+# ---------- 【設定與管理區 (測驗期間休眠)】 ----------
 with tab_settings:
-    st.subheader("🔑 API Key 設定")
-    current_key = get_api_key()
-    new_key = st.text_input("輸入 Gemini API Key", value=current_key, type="password")
-    if st.button("儲存設定"):
-        c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
-        conn.commit()
-        st.success("設定已儲存！" + (" (已同步至雲端)" if IS_CLOUD else ""))
+    if st.session_state.exam_active or st.session_state.exam_finished:
+        st.info("⚡ 測驗或查看報告中，管理面板已自動休眠以保持刷題零卡頓。")
+    else:
+        st.subheader("🔑 API Key 設定")
+        current_key = get_cached_api_key()
+        new_key = st.text_input("輸入 Gemini API Key", value=current_key, type="password")
+        if st.button("儲存設定"):
+            c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
+            conn.commit()
+            st.session_state['cached_api_key'] = new_key
+            st.success("設定已儲存！" + (" (已同步至雲端)" if IS_CLOUD else ""))
 
-    if not (st.session_state.exam_active or st.session_state.exam_finished):
         if not IS_CLOUD:
             st.divider()
             st.subheader("💾 本地備份與還原 (未設定 Turso 時可用)")
@@ -1020,6 +1067,7 @@ with tab_settings:
                 if restore_file:
                     with open('quiz_database.db', "wb") as f:
                         f.write(restore_file.getvalue())
+                    st.session_state['cached_folders'] = None
                     st.success("✅ 題庫已成功還原！重新整理頁面中...")
                     time.sleep(1)
                     st.rerun()
@@ -1033,7 +1081,7 @@ with tab_settings:
             items = []
         
         if items:
-            all_folders = get_all_folders()
+            all_folders = get_cached_folders()
             for index, row in enumerate(items):
                 f_name = row['folder']
                 p_name = row['category']
@@ -1050,6 +1098,7 @@ with tab_settings:
                                   (new_p_name, target_f, f_name, p_name))
                         c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
                         conn.commit()
+                        st.session_state['cached_folders'] = None
                         st.success("✅ 更新成功！")
                         st.rerun()
                         
@@ -1065,6 +1114,7 @@ with tab_settings:
                         c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
                         c.execute("DELETE FROM exam_history WHERE category=?", (p_name,))
                         conn.commit()
+                        st.session_state['cached_folders'] = None
                         st.success("✅ 已刪除！")
                         st.rerun()
 
@@ -1077,6 +1127,7 @@ with tab_settings:
                     if new_folder_name.strip():
                         c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_folder_name.strip(), old_folder_name))
                         conn.commit()
+                        st.session_state['cached_folders'] = None
                         st.success(f"✅ 資料夾已更名為「{new_folder_name.strip()}」！")
                         st.rerun()
 
@@ -1092,5 +1143,3 @@ with tab_settings:
                 st.write("目前沒有錯題紀錄！")
         except Exception:
             st.write("目前沒有錯題紀錄！")
-    else:
-        st.caption("⚡ 測驗或查看報告中，管理面板休眠以保持頁面極速反應。")
