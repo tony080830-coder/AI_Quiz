@@ -405,7 +405,6 @@ with tab_quiz:
             with col_order:
                 q_order = st.selectbox("🔀 出題模式：", ["隨機挑題（模擬考試）", "照考卷順序（循序練習）"])
             with col_cnt:
-                # 🌟 加入 40 題選項
                 q_count_option = st.selectbox("⏱️ 練習題數：", ["10 題", "20 題", "30 題", "40 題", "50 題", "自訂題數", "全部題目"], index=3)
             with col_lang:
                 default_lang_choice = st.selectbox("🌐 預設題目語言：", ["🇺🇸 英文版 (考試專用)", "🇹🇼 中文版"])
@@ -563,7 +562,6 @@ with tab_quiz:
         with col_t:
             st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
-            # 🌟 隨時一鍵切換英文或中文
             toggle_lbl = "🇹🇼 翻成中文" if curr_lang == "en" else "🇺🇸 切換英文"
             if st.button(toggle_lbl, key=f"lang_btn_{q_id}_{idx}", use_container_width=True):
                 st.session_state.exam_lang_overrides[q_id] = "zh" if curr_lang == "en" else "en"
@@ -735,7 +733,7 @@ with tab_review:
                             opt_label = chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)
                             st.markdown(f"- ({opt_label}) {opt_text}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
-                        exp_text = q['explanation'] if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
+                        exp_text = q.get('explanation', '') if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
                         st.markdown(f"💡 **解析**：{exp_text}")
                         if q.get('explanation_image'):
                             st.image(q['explanation_image'], caption="📸 解題筆記/截圖", use_container_width=True)
@@ -790,7 +788,6 @@ with tab_ai_gen:
             elif not gen_target_pdf:
                 st.error("請選取要模仿的考卷/講義！")
             else:
-                # 從該 PDF 抽樣 6~8 題作為範本
                 c.execute("SELECT text, options, answer FROM questions WHERE category=? ORDER BY RANDOM() LIMIT 8", (gen_target_pdf,))
                 sample_rows = c.fetchall()
                 if not sample_rows:
@@ -799,32 +796,23 @@ with tab_ai_gen:
                     sample_texts = []
                     for idx_s, s in enumerate(sample_rows, 1):
                         opts_str = ", ".join(get_question_options(s))
-                        sample_texts.append(f"Sample {idx_s}:\nQuestion: {s['text']}\nOptions: {opts_str}\nKey Answer: {s['answer']}")
-                    sample_context = "\n\n".join(sample_texts)
+                        sample_texts.append(f"Sample {idx_s}: Question: {s['text']} | Options: {opts_str} | Key Answer: {s['answer']}")
+                    sample_context = "\n".join(sample_texts)
 
                     with st.spinner(f"AI 正在精讀「{gen_target_pdf}」考點並撰寫 {gen_q_count} 道全英文高階仿題..."):
                         try:
                             genai.configure(api_key=api_key)
                             model = genai.GenerativeModel('gemini-3.8-flash')
                             ai_prompt = (
-                                f"You are a leading medical professor and examination board question creator. "
-                                f"Analyze the following real exam questions from the lecture '{gen_target_pdf}':\n\n"
-                                f"【SAMPLE QUESTIONS FROM LECTURE】:\n{sample_context}\n\n"
-                                f"【TASK】:\n"
-                                f"Generate {gen_q_count} BRAND-NEW, UNIQUE, high-yield multiple-choice questions in ENGLISH. "
-                                f"Style/Difficulty: {gen_diff}.\n"
-                                f"【RULES】:\n"
-                                f"1. Do NOT duplicate the sample questions word-for-word. Synthesize clinical vignettes or biochemical mechanisms testing the exact same conceptual topics.\n"
-                                f"2. Options MUST be in English, listing 4 or 5 plausible choices (A-D or A-E).\n"
-                                f"3. Provide the single best correct answer string or letter.\n"
-                                f"4. Provide a thorough, high-yield explanation written in Traditional Chinese (繁體中文台灣醫學用語) explaining the mechanism and why wrong choices are incorrect.\n"
-                                f"5. Strictly output a standard JSON array of objects without Markdown wrappers:\n"
-                                f'[{{\n'
-                                f'  "text": "A 45-year-old male presents with...",\n'
-                                f'  "options": ["A. Choice 1", "B. Choice 2", "C. Choice 3", "D. Choice 4", "E. Choice 5"],\n'
-                                f'  "answer": "A",\n'
-                                f'  "explanation": "繁體中文核心考點機轉詳解..."\n'
-                                f'}}]\n'
+                                f"You are a medical examination professor. Analyze these questions from '{gen_target_pdf}':\n"
+                                f"{sample_context}\n\n"
+                                f"TASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\n"
+                                "RULES:\n"
+                                "1. Options in English (4 or 5 choices).\n"
+                                "2. Provide best answer string or letter.\n"
+                                "3. Explanation in Traditional Chinese (繁體中文).\n"
+                                "4. Output standard JSON array only:\n"
+                                '[{"text": "...", "options": ["A. ...", "B. ..."], "answer": "A", "explanation": "..."}]'
                             )
                             resp = model.generate_content(ai_prompt, request_options={"timeout": 120})
                             raw = resp.text.strip()
@@ -835,7 +823,6 @@ with tab_ai_gen:
                         except Exception as e:
                             st.error(f"AI 模擬出題失敗：{e}")
 
-        # 預覽與一鍵入庫
         if st.session_state.ai_generated_temp:
             st.divider()
             st.subheader(f"📋 模擬仿題預覽（共 {len(st.session_state.ai_generated_temp)} 題）")
@@ -867,7 +854,7 @@ with tab_ai_gen:
                     conn.commit()
                     st.session_state['cached_folders'] = None
                     st.session_state.ai_generated_temp = []
-                    st.success(f"🎉 成功存入雲端！現在即可前往「🎯 開始測驗」勾選「{save_cat_name}」進行全真練習！")
+                    st.success(f"🎉 成功存入雲端！現在即可前往「🎯 開始測驗」勾選「{save_cat_name}」進行練習！")
                     st.rerun()
             with col_clear_btn:
                 if st.button("🗑️ 清除預覽", use_container_width=True):
@@ -1228,5 +1215,3 @@ with tab_settings:
                 st.write("目前沒有錯題紀錄！")
         except Exception:
             st.write("目前沒有錯題紀錄！")
-    else:
-        st.caption("⚡ 測驗或查看報告中，管理面板休眠以保持頁面極速反應。")
