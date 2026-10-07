@@ -121,7 +121,7 @@ if '_db_schema_ready' not in st.session_state:
         st.session_state['_db_schema_ready'] = True
     except: pass
 
-# 🌟 拔除快取，改為即時輕量查詢，徹底避免空資料夾死鎖
+# 🌟 徹底拔除死鎖快取，確保休眠喚醒後能正確抓到資料
 def get_all_folders():
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
@@ -313,7 +313,10 @@ with tab_practice:
     elif not st.session_state.exam_active:
         st.markdown("### 🎓 刷題練習模式（做一題、對一題、看詳解）")
         folders = get_all_folders()
-        if not folders: st.warning("題庫空空如也，請先匯入考卷！")
+        if not folders: 
+            st.warning("題庫空空如也，請先到「📥 匯入題庫」上傳考卷或簡報檔案！")
+            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此喚醒)", use_container_width=True):
+                st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
             with col_f: selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="p_fold")
@@ -481,7 +484,10 @@ with tab_test:
     elif not st.session_state.exam_active and not st.session_state.exam_finished:
         st.markdown("### 📝 模擬測驗模式（全卷作答，最後統一給分結算）")
         folders = get_all_folders()
-        if not folders: st.warning("請先匯入考卷！")
+        if not folders: 
+            st.warning("請先匯入考卷！")
+            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此喚醒)", use_container_width=True, key="wake_t"):
+                st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
             with col_f: selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="t_fold")
@@ -703,7 +709,9 @@ with tab_review:
     else:
         st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
         folders = get_all_folders()
-        if not folders: st.info("目前沒有題庫資料。")
+        if not folders: 
+            st.info("目前沒有題庫資料。")
+            if st.button("🔄 重新連線雲端", key="wake_r"): st.rerun()
         else:
             col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
             with col_f: rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders)
@@ -763,7 +771,9 @@ with tab_ai_gen:
     else:
         st.markdown("### 🧠 AI 模擬出題（從特定 PDF/講義深度模仿）")
         all_gen_folders = get_all_folders()
-        if not all_gen_folders: st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳 PDF！")
+        if not all_gen_folders: 
+            st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳 PDF！")
+            if st.button("🔄 重新連線雲端", key="wake_a"): st.rerun()
         else:
             col_g1, col_g2 = st.columns(2)
             with col_g1: gen_folder = st.selectbox("📂 選擇範本所屬資料夾：", all_gen_folders)
