@@ -121,24 +121,21 @@ if '_db_schema_ready' not in st.session_state:
         st.session_state['_db_schema_ready'] = True
     except: pass
 
-def get_cached_folders():
-    if 'cached_folders' not in st.session_state or st.session_state['cached_folders'] is None:
-        try:
-            c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
-            raw_rows = c.fetchall()
-            result = [r[0] if isinstance(r, (tuple, list)) else (r.get('folder') if isinstance(r, dict) else r['folder']) for r in raw_rows]
-            st.session_state['cached_folders'] = sorted(list(set([str(v).strip() for v in result if v and str(v).strip()])))
-        except: st.session_state['cached_folders'] = []
-    return st.session_state['cached_folders']
+# 🌟 拔除快取，改為即時輕量查詢，徹底避免空資料夾死鎖
+def get_all_folders():
+    try:
+        c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
+        raw_rows = c.fetchall()
+        result = [r[0] if isinstance(r, (tuple, list)) else (r.get('folder') if isinstance(r, dict) else r['folder']) for r in raw_rows]
+        return sorted(list(set([str(v).strip() for v in result if v and str(v).strip()])))
+    except: return []
 
-def get_cached_api_key():
-    if 'cached_api_key' not in st.session_state or st.session_state['cached_api_key'] is None:
-        try:
-            c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
-            res = c.fetchone()
-            st.session_state['cached_api_key'] = res['value'] if res else ""
-        except: st.session_state['cached_api_key'] = ""
-    return st.session_state['cached_api_key']
+def get_api_key():
+    try:
+        c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
+        res = c.fetchone()
+        return res['value'] if res else ""
+    except: return ""
 
 def get_categories_by_folder(folder=None, only_star=False):
     try:
@@ -201,7 +198,7 @@ def get_question_bilingual(q, target_lang="en"):
         try: return q[col_t], (json.loads(q[col_o]) if q.get(col_o) else orig_opts)
         except: return q[col_t], orig_opts
 
-    api_key = get_cached_api_key()
+    api_key = get_api_key()
     if not api_key: return orig_text, orig_opts
 
     try:
@@ -263,7 +260,7 @@ def extract_text_from_pptx(file_bytes):
 # ================= 1. 測驗與練習狀態管理 =================
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
-if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice" 
+if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice"
 if 'exam_q_ids' not in st.session_state: st.session_state.exam_q_ids = []
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_user_answers' not in st.session_state: st.session_state.exam_user_answers = {}
@@ -315,7 +312,7 @@ with tab_practice:
         st.info("⚠️ 正在進行模擬測驗，請前往「📝 模擬測驗」分頁繼續。")
     elif not st.session_state.exam_active:
         st.markdown("### 🎓 刷題練習模式（做一題、對一題、看詳解）")
-        folders = get_cached_folders()
+        folders = get_all_folders()
         if not folders: st.warning("題庫空空如也，請先匯入考卷！")
         else:
             col_f, col_st = st.columns([2, 1])
@@ -373,7 +370,6 @@ with tab_practice:
             st.session_state.exam_active = False
             st.rerun()
             
-        # 🌟 核心防護：防止網頁連點導致的 Index 超出範圍
         st.session_state.exam_index = max(0, min(st.session_state.exam_index, total_q - 1))
         idx = st.session_state.exam_index
         curr_q_id = st.session_state.exam_q_ids[idx]
@@ -437,7 +433,7 @@ with tab_practice:
             if exp and exp.strip() and exp != '無提供詳解': st.info(f"💡 解析：{exp}")
             else:
                 if st.button("🧠 AI 即時分析詳解", key=f"p_ai_exp_{curr_q_id}"):
-                    api_key = get_cached_api_key()
+                    api_key = get_api_key()
                     if not api_key: st.error("請先輸入 API Key！")
                     else:
                         with st.spinner("撰寫中..."):
@@ -465,7 +461,6 @@ with tab_practice:
                 if st.button("⬅️ 看上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
                     flush_pending_updates()
                     st.session_state.exam_index -= 1
-                    # 重新檢查上一題是否已作答
                     check_prev_id = st.session_state.exam_q_ids[st.session_state.exam_index]
                     st.session_state.practice_answered = (check_prev_id in st.session_state.exam_user_answers)
                     st.rerun()
@@ -485,7 +480,7 @@ with tab_test:
         st.info("⚠️ 正在進行刷題練習，請前往「🎓 刷題練習」分頁繼續。")
     elif not st.session_state.exam_active and not st.session_state.exam_finished:
         st.markdown("### 📝 模擬測驗模式（全卷作答，最後統一給分結算）")
-        folders = get_cached_folders()
+        folders = get_all_folders()
         if not folders: st.warning("請先匯入考卷！")
         else:
             col_f, col_st = st.columns([2, 1])
@@ -542,7 +537,6 @@ with tab_test:
             st.session_state.exam_active = False
             st.rerun()
             
-        # 🌟 核心防護：防止網頁連點導致的 Index 超出範圍
         st.session_state.exam_index = max(0, min(st.session_state.exam_index, total_q - 1))
         idx = st.session_state.exam_index
         curr_q_id = st.session_state.exam_q_ids[idx]
@@ -708,7 +702,7 @@ with tab_review:
         st.info("⚡ 系統運作中，背景查詢已自動暫停以確保刷題零卡頓。")
     else:
         st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
-        folders = get_cached_folders()
+        folders = get_all_folders()
         if not folders: st.info("目前沒有題庫資料。")
         else:
             col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
@@ -768,7 +762,7 @@ with tab_ai_gen:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
     else:
         st.markdown("### 🧠 AI 模擬出題（從特定 PDF/講義深度模仿）")
-        all_gen_folders = get_cached_folders()
+        all_gen_folders = get_all_folders()
         if not all_gen_folders: st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳 PDF！")
         else:
             col_g1, col_g2 = st.columns(2)
@@ -782,7 +776,7 @@ with tab_ai_gen:
             with col_g_diff: gen_diff = st.selectbox("🎓 題目風格難度：", ["USMLE Step 1 / 全英風格", "國考臨床結合概念題", "基礎生化代謝途徑專題"])
 
             if st.button("✨ 分析講義並生成全新仿題", type="primary", use_container_width=True):
-                api_key = get_cached_api_key()
+                api_key = get_api_key()
                 if not api_key: st.error("請輸入 API Key！")
                 elif not gen_target_pdf: st.error("請選取範本！")
                 else:
@@ -818,7 +812,6 @@ with tab_ai_gen:
                         opts_json = json.dumps(opts_clean, ensure_ascii=False)
                         c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, text_en, options_en) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)", (gen_folder, save_cat_name, g_item.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(g_item.get('answer', '')), g_item.get('explanation', ''), g_item.get('text', ''), opts_json))
                     conn.commit()
-                    st.session_state['cached_folders'] = None
                     st.session_state.ai_generated_temp = []
                     st.success("🎉 存入雲端成功！"); st.rerun()
 
@@ -828,7 +821,7 @@ with tab_import:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
     else:
         st.markdown("### 🤖 智慧題庫匯入")
-        existing_folders = get_cached_folders()
+        existing_folders = get_all_folders()
         folder_choice = st.selectbox("📂 目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
         target_folder = st.text_input("新資料夾名稱", "生化") if folder_choice == "-- ➕ 新增資料夾 --" else folder_choice
             
@@ -842,7 +835,7 @@ with tab_import:
             with col_p: page_range_str = st.text_input("🎯 頁數範圍 (例如 1-10)：", placeholder="留空代表全份")
             
             if st.button("🚀 開始全自動匯入", type="primary") and uploaded_file:
-                api_key = get_cached_api_key()
+                api_key = get_api_key()
                 if not api_key: st.error("請輸入 API Key！")
                 else:
                     fname = uploaded_file.name.lower()
@@ -895,12 +888,11 @@ with tab_import:
                                 break
                             except: time.sleep(5)
                         prog_bar.progress((b_idx + 1) / len(batches))
-                    st.session_state['cached_folders'] = None
                     if total_imported > 0: st.success(f"🎉 成功存入 {total_imported} 題！")
         else:
             ptext = st.text_area("請在此貼上題目文字：", height=250)
             if st.button("🚀 解析貼上內容", type="primary") and ptext.strip():
-                api_key = get_cached_api_key()
+                api_key = get_api_key()
                 if api_key:
                     with st.spinner("提取中..."):
                         try:
@@ -914,7 +906,6 @@ with tab_import:
                                 opts_json = json.dumps(opts_clean, ensure_ascii=False)
                                 c.execute("INSERT INTO questions (folder, category, text, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,0,0)", (target_folder, "貼上匯入", nq.get('text', ''), opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
                             conn.commit()
-                            st.session_state['cached_folders'] = None
                             st.success(f"🎉 成功存入 {len(new_questions)} 題！")
                         except Exception as e: st.error(f"失敗：{e}")
 
@@ -924,11 +915,10 @@ with tab_settings:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
     else:
         st.subheader("🔑 API Key 設定")
-        new_key = st.text_input("輸入 Gemini API Key", value=get_cached_api_key(), type="password")
+        new_key = st.text_input("輸入 Gemini API Key", value=get_api_key(), type="password")
         if st.button("儲存設定"):
             c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
             conn.commit()
-            st.session_state['cached_api_key'] = new_key
             st.success("設定已儲存！")
 
         st.divider()
@@ -936,7 +926,7 @@ with tab_settings:
         try:
             c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
             items = c.fetchall()
-            all_folders = get_cached_folders()
+            all_folders = get_all_folders()
             for index, row in enumerate(items):
                 f_name, p_name = row['folder'], row['category']
                 with st.expander(f"{'⭐ ' if bool(row['pdf_starred']) else ''}📂 {f_name} ＞ 📄 {p_name}"):
@@ -946,11 +936,11 @@ with tab_settings:
                     if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
                         c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", (new_p_name, target_f, f_name, p_name))
                         c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
-                        conn.commit(); st.session_state['cached_folders'] = None; st.rerun()
+                        conn.commit(); st.rerun()
                     if col_star_pdf.button("⭐ 標記星號" if not bool(row['pdf_starred']) else "☆ 取消星號", key=f"star_pdf_{index}", use_container_width=True):
                         c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", (0 if bool(row['pdf_starred']) else 1, f_name, p_name))
                         conn.commit(); st.rerun()
                     if col_del.button("🗑️ 刪除", key=f"del_{index}", use_container_width=True):
                         c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
-                        conn.commit(); st.session_state['cached_folders'] = None; st.rerun()
+                        conn.commit(); st.rerun()
         except: pass
