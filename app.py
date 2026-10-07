@@ -121,7 +121,7 @@ if '_db_schema_ready' not in st.session_state:
         st.session_state['_db_schema_ready'] = True
     except: pass
 
-# 🌟 徹底拔除死鎖快取，確保休眠喚醒後能正確抓到資料
+# 🌟 徹底拔除死鎖快取，改為即時輕量查詢
 def get_all_folders():
     try:
         c.execute("SELECT DISTINCT folder FROM questions WHERE folder IS NOT NULL AND folder != ''")
@@ -315,7 +315,9 @@ with tab_practice:
         folders = get_all_folders()
         if not folders: 
             st.warning("題庫空空如也，請先到「📥 匯入題庫」上傳考卷或簡報檔案！")
-            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此喚醒)", use_container_width=True):
+            # 🌟 強制重啟連線按鈕
+            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此強制喚醒)", use_container_width=True, key="wake_p"):
+                get_db_connection.clear()
                 st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
@@ -486,7 +488,8 @@ with tab_test:
         folders = get_all_folders()
         if not folders: 
             st.warning("請先匯入考卷！")
-            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此喚醒)", use_container_width=True, key="wake_t"):
+            if st.button("🔄 重新連線雲端 (若資料庫休眠中，點此強制喚醒)", use_container_width=True, key="wake_t"):
+                get_db_connection.clear()
                 st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
@@ -682,14 +685,14 @@ with tab_test:
                 c_q_head, c_q_lang = st.columns([4, 1.2])
                 with c_q_head: st.markdown(f"**【完整題目】**：{q_txt}")
                 with c_q_lang:
-                    if st.button("🇹🇼 翻中文" if rev_lang == "en" else "🇺🇸 切英文", key=f"res_lang_{qid}"):
+                    if st.button("🇹🇼 翻中文" if rev_lang == "en" else "🇺🇸 切英文", key=f"res_lang_{qid}_{i}"):
                         st.session_state.exam_lang_overrides[qid] = "zh" if rev_lang == "en" else "en"
                         st.rerun()
 
                 for opt_idx, opt_text in enumerate(q_opts):
                     is_this_ans = check_is_correct(opt_idx, q_data)
                     is_this_user = (u_idx == opt_idx)
-                    if is_this_ans: st.markdown(f"- **:green[✅ {opt_text} （正解）]**")
+                    if is_this_ans: st.markdown(f"- **:green[✅ {opt_text} （正確答案）]**")
                     elif is_this_user: st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
                     else: st.markdown(f"- {opt_text}")
                 
@@ -711,7 +714,9 @@ with tab_review:
         folders = get_all_folders()
         if not folders: 
             st.info("目前沒有題庫資料。")
-            if st.button("🔄 重新連線雲端", key="wake_r"): st.rerun()
+            if st.button("🔄 重新連線雲端", key="wake_r"): 
+                get_db_connection.clear()
+                st.rerun()
         else:
             col_f, col_p, col_st = st.columns([1.5, 1.5, 1])
             with col_f: rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders)
@@ -773,7 +778,9 @@ with tab_ai_gen:
         all_gen_folders = get_all_folders()
         if not all_gen_folders: 
             st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳 PDF！")
-            if st.button("🔄 重新連線雲端", key="wake_a"): st.rerun()
+            if st.button("🔄 重新連線雲端", key="wake_a"): 
+                get_db_connection.clear()
+                st.rerun()
         else:
             col_g1, col_g2 = st.columns(2)
             with col_g1: gen_folder = st.selectbox("📂 選擇範本所屬資料夾：", all_gen_folders)
