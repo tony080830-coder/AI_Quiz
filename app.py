@@ -80,7 +80,6 @@ class DBWrapper:
         try: self.conn.commit()
         except: pass
 
-# 🌟 極速核心：快取資料庫連線，徹底消滅點擊切換時的延遲卡頓
 @st.cache_resource
 def get_db_connection():
     is_cloud = False
@@ -226,7 +225,7 @@ def get_question_bilingual(q, target_lang="en"):
 # ================= 1. 測驗與練習狀態管理 =================
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
-if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice" # "practice" 或 "test"
+if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice" 
 if 'exam_questions' not in st.session_state: st.session_state.exam_questions = []
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_user_answers' not in st.session_state: st.session_state.exam_user_answers = {}
@@ -240,6 +239,9 @@ if 'exam_lang_mode' not in st.session_state: st.session_state.exam_lang_mode = "
 if 'exam_lang_overrides' not in st.session_state: st.session_state.exam_lang_overrides = {}
 if 'practice_answered' not in st.session_state: st.session_state.practice_answered = False
 if 'pending_db_updates' not in st.session_state: st.session_state.pending_db_updates = {}
+
+# 🌟 補回缺失的狀態變數，修復 KeyError (AttributeError)！
+if 'ai_generated_temp' not in st.session_state: st.session_state.ai_generated_temp = []
 
 def check_is_correct(chosen_idx, q_item):
     orig_opts = get_question_options(q_item)
@@ -276,7 +278,6 @@ with tab_quiz:
         if not folders:
             st.warning("題庫空空如也，請先到「匯入題庫」上傳考卷或簡報檔案！")
         else:
-            # 🌟 模式選擇（練習 vs 測驗）
             st.markdown("### 1️⃣ 選擇模式與題庫")
             exam_mode_sel = st.radio("🎯 系統模式：", ["🎓 練習模式 (做一題、對一題、看詳解)", "📝 測驗模式 (全卷作答，最後統一給分結算)"], horizontal=True)
             
@@ -354,7 +355,6 @@ with tab_quiz:
         curr_lang = st.session_state.exam_lang_overrides.get(q_id, st.session_state.exam_lang_mode)
         disp_text, disp_options = get_question_bilingual(curr_q, curr_lang)
 
-        # 頂部狀態列
         elapsed_sec = int(time.time() - st.session_state.exam_start_time)
         m, s = divmod(elapsed_sec, 60)
         time_display = f"⏱️ 用時：{m:02d}:{s:02d}"
@@ -392,7 +392,6 @@ with tab_quiz:
                 st.session_state.exam_active, st.session_state.exam_finished = False, True
                 st.rerun()
 
-        # 導航盤 (僅測驗模式顯示，或練習模式方便查看)
         with st.expander("📋 題目導航盤（點擊快速跳題）", expanded=False):
             cols = st.columns(10)
             for i, q_it in enumerate(st.session_state.exam_questions):
@@ -404,7 +403,6 @@ with tab_quiz:
 
         st.divider()
 
-        # 題幹與雙語
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
@@ -420,7 +418,6 @@ with tab_quiz:
                 curr_q['is_starred'] = new_star
                 st.rerun()
 
-        # ================= 模式分歧：練習 vs 測驗 =================
         current_chosen_idx = st.session_state.exam_user_answers.get(q_id, None)
 
         if mode == "practice":
@@ -448,7 +445,6 @@ with tab_quiz:
                     elif is_this_user: st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
                     else: st.markdown(f"- <span style='color: gray;'>{opt_text}</span>", unsafe_allow_html=True)
 
-                # 練習模式特有：即時看解析
                 st.divider()
                 exp = curr_q.get('explanation', '')
                 if exp and exp.strip() and exp != '無提供詳解': st.info(f"💡 解析：{exp}")
@@ -488,7 +484,7 @@ with tab_quiz:
                         st.rerun()
 
         else:
-            # 📝 測驗模式 (不透漏對錯)
+            # 📝 測驗模式
             st.write("請選擇你的答案：")
             for opt_idx, opt_text in enumerate(disp_options):
                 is_chosen = (current_chosen_idx == opt_idx)
@@ -569,7 +565,7 @@ with tab_quiz:
             st.session_state.exam_questions, st.session_state.exam_user_answers = [], {}
             st.rerun()
 
-# ---------- 【錯題總覽區 (測驗期間休眠)】 ----------
+# ---------- 【錯題總覽區】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，背景查詢已自動暫停以確保點擊 0 延遲。")
@@ -628,7 +624,7 @@ with tab_review:
                                     conn.commit()
                                     st.toast("✅ 筆記截圖已移除！"); st.rerun()
 
-# ---------- 【🧠 AI 仿題出題區 (測驗期間休眠)】 ----------
+# ---------- 【🧠 AI 仿題出題區】 ----------
 with tab_ai_gen:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
@@ -688,7 +684,7 @@ with tab_ai_gen:
                     st.session_state.ai_generated_temp = []
                     st.success("🎉 存入雲端成功！"); st.rerun()
 
-# ---------- 【匯入區 (測驗期間休眠)】 ----------
+# ---------- 【匯入區】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
@@ -784,7 +780,7 @@ with tab_import:
                             st.success(f"🎉 成功存入 {len(new_questions)} 題！")
                         except Exception as e: st.error(f"失敗：{e}")
 
-# ---------- 【設定與管理區 (測驗期間休眠)】 ----------
+# ---------- 【設定與管理區】 ----------
 with tab_settings:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
