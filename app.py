@@ -260,11 +260,11 @@ def extract_text_from_pptx(file_bytes):
     except Exception as e:
         return f"[PPT 提取錯誤: {e}]"
 
-# ================= 1. 測驗與練習狀態管理 (極速 ID 快取機制) =================
+# ================= 1. 測驗與練習狀態管理 =================
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
-if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice"
-if 'exam_q_ids' not in st.session_state: st.session_state.exam_q_ids = [] # 🌟 核心：只存題號，終結卡頓！
+if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice" 
+if 'exam_q_ids' not in st.session_state: st.session_state.exam_q_ids = []
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_user_answers' not in st.session_state: st.session_state.exam_user_answers = {}
 if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs = []
@@ -305,7 +305,6 @@ st.title("📝 AI 專屬錯題本系統")
 if IS_CLOUD: st.success("☁️ 已極速連線至 Turso 雲端資料庫！(重開機資料永不丟失)")
 else: st.caption("🖥️ 本地暫存模式")
 
-# 🌟 全新獨立分頁設計
 tab_practice, tab_test, tab_review, tab_ai_gen, tab_import, tab_settings = st.tabs([
     "🎓 刷題練習", "📝 模擬測驗", "📖 錯題總覽", "🧠 AI 仿題出題", "📥 匯入題庫", "⚙️ 設定"
 ])
@@ -370,6 +369,12 @@ with tab_practice:
     # --- 練習進行中 ---
     elif st.session_state.exam_active and st.session_state.exam_mode == "practice":
         total_q = len(st.session_state.exam_q_ids)
+        if total_q == 0:
+            st.session_state.exam_active = False
+            st.rerun()
+            
+        # 🌟 核心防護：防止網頁連點導致的 Index 超出範圍
+        st.session_state.exam_index = max(0, min(st.session_state.exam_index, total_q - 1))
         idx = st.session_state.exam_index
         curr_q_id = st.session_state.exam_q_ids[idx]
         
@@ -390,7 +395,6 @@ with tab_practice:
 
         st.divider()
 
-        # 題幹與雙語
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
@@ -446,7 +450,6 @@ with tab_practice:
 
             if curr_q.get('explanation_image'): st.image(curr_q['explanation_image'], use_container_width=True)
 
-            # 🌟 練習模式專屬：極速編輯/上傳筆記
             with st.expander("✏️ 編輯本題解析 / 上傳筆記截圖 (極速秒存)"):
                 rev_exp_input = st.text_area("文字解析：", value=curr_q.get('explanation', ''), key=f"p_rev_txt_{curr_q_id}")
                 rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"p_rev_img_{curr_q_id}")
@@ -459,10 +462,12 @@ with tab_practice:
 
             col_prev, col_next = st.columns(2)
             with col_prev:
-                if st.button("⬅️ 上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
+                if st.button("⬅️ 看上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
                     flush_pending_updates()
                     st.session_state.exam_index -= 1
-                    st.session_state.practice_answered = (st.session_state.exam_q_ids[st.session_state.exam_index] in st.session_state.exam_user_answers)
+                    # 重新檢查上一題是否已作答
+                    check_prev_id = st.session_state.exam_q_ids[st.session_state.exam_index]
+                    st.session_state.practice_answered = (check_prev_id in st.session_state.exam_user_answers)
                     st.rerun()
             with col_next:
                 if st.button("🏁 完成" if idx >= total_q - 1 else "➡️ 下一題", type="primary", use_container_width=True, key="p_next"):
@@ -470,7 +475,8 @@ with tab_practice:
                     if idx >= total_q - 1: st.session_state.exam_active = False
                     else:
                         st.session_state.exam_index += 1
-                        st.session_state.practice_answered = (st.session_state.exam_q_ids[st.session_state.exam_index] in st.session_state.exam_user_answers)
+                        check_next_id = st.session_state.exam_q_ids[st.session_state.exam_index]
+                        st.session_state.practice_answered = (check_next_id in st.session_state.exam_user_answers)
                     st.rerun()
 
 # ---------- 【📝 分頁二：模擬測驗 (大考模式)】 ----------
@@ -532,6 +538,12 @@ with tab_test:
     # --- 測驗進行中 ---
     elif st.session_state.exam_active and st.session_state.exam_mode == "test":
         total_q = len(st.session_state.exam_q_ids)
+        if total_q == 0:
+            st.session_state.exam_active = False
+            st.rerun()
+            
+        # 🌟 核心防護：防止網頁連點導致的 Index 超出範圍
+        st.session_state.exam_index = max(0, min(st.session_state.exam_index, total_q - 1))
         idx = st.session_state.exam_index
         curr_q_id = st.session_state.exam_q_ids[idx]
         
@@ -559,7 +571,6 @@ with tab_test:
                 st.session_state.exam_total_time_str = f"{elapsed_sec//60} 分 {elapsed_sec%60} 秒"
                 curr_wrong, curr_correct = [], []
                 
-                # 結算批次抓取計算
                 for qid in st.session_state.exam_q_ids:
                     c.execute("SELECT options, answer FROM questions WHERE id=?", (qid,))
                     chk_q = dict(c.fetchone())
@@ -669,7 +680,7 @@ with tab_test:
             status_icon = "🟢" if is_right else ("⚪ 未作答" if u_idx is None else "🔴")
             with st.expander(f"{status_icon} 第 {i} 題：{q_txt[:35]}..."):
                 c_q_head, c_q_lang = st.columns([4, 1.2])
-                with c_q_head: st.markdown(f"**【題目】**：{q_txt}")
+                with c_q_head: st.markdown(f"**【完整題目】**：{q_txt}")
                 with c_q_lang:
                     if st.button("🇹🇼 翻中文" if rev_lang == "en" else "🇺🇸 切英文", key=f"res_lang_{qid}"):
                         st.session_state.exam_lang_overrides[qid] = "zh" if rev_lang == "en" else "en"
