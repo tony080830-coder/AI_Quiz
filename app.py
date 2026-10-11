@@ -922,6 +922,7 @@ with tab_import:
                         prog_bar.progress((b_idx + 1) / len(batches))
                     if total_imported > 0: st.success(f"🎉 成功存入 {total_imported} 題！")
         else:
+            paste_category_name = st.text_input("📄 為這批題目命名考卷/講義名稱：", value="未命名考卷")
             ptext = st.text_area("請在此貼上大量題目文字 (系統將自動幫您每 40 行分批解析)：", height=250)
             if st.button("🚀 智慧自動分批解析並匯入", type="primary") and ptext.strip():
                 api_key = get_api_key()
@@ -949,7 +950,7 @@ with tab_import:
                                 for nq in new_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,0,0)", (target_folder, "貼上匯入", nq.get('text', ''), opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                                    c.execute("INSERT INTO questions (folder, category, text, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
                                 conn.commit()
                                 total_imported += len(new_questions)
                                 break
@@ -984,20 +985,21 @@ with tab_settings:
                 st.info(f"已選取 {len(selected_batch)} 份考卷，請選擇下方動作：")
                 col_b1, col_b2 = st.columns(2)
                 with col_b1:
-                    batch_target = st.selectbox("🎯 批次移動至資料夾：", all_folders + ["-- 輸入全新資料夾路徑 --"], key="batch_move_sel")
+                    batch_target = st.selectbox("🎯 批次移動至資料夾：", ["-- 手動輸入全新路徑 (自由建立上下層) --"] + all_folders, key="batch_move_sel")
                     batch_final_folder = batch_target
-                    if batch_target == "-- 輸入全新資料夾路徑 --":
-                        batch_final_folder = st.text_input("輸入全新路徑 (例如：大三/生化)：", key="batch_move_txt")
+                    if batch_target == "-- 手動輸入全新路徑 (自由建立上下層) --":
+                        batch_final_folder = st.text_input("✏️ 輸入全新路徑 (用 / 分隔，例如：大三/生化/期中)：", key="batch_move_txt")
                     
                     if st.button("🚀 執行批次移動", type="primary", use_container_width=True):
                         if batch_final_folder.strip():
+                            clean_dst = batch_final_folder.strip().replace('//', '/')
                             for sel in selected_batch:
                                 f_part, c_part = sel.split(" ＞ 📄 ")
                                 orig_f = f_part.replace("📂 ", "")
                                 orig_c = c_part
-                                c.execute("UPDATE questions SET folder=? WHERE folder=? AND category=?", (batch_final_folder.strip(), orig_f, orig_c))
+                                c.execute("UPDATE questions SET folder=? WHERE folder=? AND category=?", (clean_dst, orig_f, orig_c))
                             conn.commit()
-                            st.success(f"✅ 成功將 {len(selected_batch)} 份考卷移動至「{batch_final_folder.strip()}」！")
+                            st.success(f"✅ 成功將 {len(selected_batch)} 份考卷移動至「{clean_dst}」！")
                             time.sleep(1)
                             st.rerun()
                         else:
@@ -1022,24 +1024,20 @@ with tab_settings:
 
         st.divider()
         st.subheader("📄 單一考卷詳細管理 (更名 / 星號 / 移動)")
+        st.caption("💡 直接修改路徑即可自由建立上下層資料夾，例如在前面加上 `大三/` 就能包進母資料夾。")
         try:
             c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
             items = c.fetchall()
             for index, row in enumerate(items):
                 f_name, p_name = row['folder'], row['category']
                 with st.expander(f"{'⭐ ' if bool(row['pdf_starred']) else ''}📂 {f_name} ＞ 📄 {p_name}"):
-                    new_p_name = st.text_input("📄 修改考卷名稱", value=p_name, key=f"p_rename_{index}")
-                    
-                    target_f = st.selectbox("📂 移動至現有資料夾", all_folders + ["-- 輸入全新資料夾路徑 --"], index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"p_move_sel_{index}")
-                    final_folder = f_name
-                    if target_f == "-- 輸入全新資料夾路徑 --":
-                        final_folder = st.text_input("輸入全新資料夾路徑 (支援多層級，用 / 分隔)：", value=f_name, key=f"p_move_txt_{index}")
-                    else:
-                        final_folder = target_f
+                    new_p_name = st.text_input("📄 考卷名稱", value=p_name, key=f"p_rename_{index}")
+                    new_f_name = st.text_input("📂 所屬資料夾 (用 / 分隔建立多層級)", value=f_name, key=f"p_folder_{index}")
 
                     col_save, col_star_pdf, col_del = st.columns(3)
                     if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
-                        c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", (new_p_name.strip(), final_folder.strip(), f_name, p_name))
+                        clean_folder = new_f_name.strip().replace('//', '/')
+                        c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", (new_p_name.strip(), clean_folder, f_name, p_name))
                         c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name.strip(), p_name))
                         conn.commit(); st.rerun()
                     if col_star_pdf.button("⭐ 標記星號" if not bool(row['pdf_starred']) else "☆ 取消星號", key=f"star_pdf_{index}", use_container_width=True):
@@ -1051,56 +1049,14 @@ with tab_settings:
         except: pass
 
         st.divider()
-        st.subheader("🗂️ 資料夾階層管理 (打包移動整個資料夾)")
-        st.caption("💡 可將整個資料夾移入另一個資料夾，或直接輸入全新的多層級路徑（例如：大三/下學期/生化）")
-        try:
-            all_folders_hier = get_all_folders()
-            if all_folders_hier:
-                col_m1, col_m2 = st.columns(2)
-                with col_m1: move_src = st.selectbox("📦 選擇要移動的資料夾：", all_folders_hier)
-                with col_m2: 
-                    dst_options = ["-- 移至最上層 (根目錄) --", "-- ➕ 建立全新母/子資料夾 --"] + [f for f in all_folders_hier if f != move_src]
-                    move_dst = st.selectbox("🎯 移入目標：", dst_options)
-                
-                custom_dst_path = ""
-                if move_dst == "-- ➕ 建立全新母/子資料夾 --":
-                    custom_dst_path = st.text_input("📁 輸入新的目標路徑 (用 / 分隔，例如：大三/生化)：", placeholder="例如：大三/生化")
-
-                if st.button("🚀 確認移動整個資料夾", use_container_width=True):
-                    base_name = move_src.split('/')[-1]
-                    if move_dst == "-- 移至最上層 (根目錄) --":
-                        new_path = base_name
-                    elif move_dst == "-- ➕ 建立全新母/子資料夾 --":
-                        if not custom_dst_path.strip():
-                            st.warning("請輸入新路徑！")
-                            st.stop()
-                        new_path = f"{custom_dst_path.strip()}/{base_name}".replace('//', '/')
-                    else:
-                        new_path = f"{move_dst}/{base_name}"
-                    
-                    c.execute("SELECT DISTINCT folder FROM questions WHERE folder = ? OR folder LIKE ?", (move_src, f"{move_src}/%"))
-                    folders_to_update = [row[0] for row in c.fetchall()]
-                    for f in folders_to_update:
-                        if f == move_src:
-                            c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path, f))
-                        else:
-                            sub_path = f[len(move_src):] 
-                            c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path + sub_path, f))
-                    conn.commit()
-                    st.success(f"✅ 已成功將資料夾移動至：{new_path}")
-                    time.sleep(1)
-                    st.rerun()
-        except: pass
-
-        st.divider()
-        st.subheader("✏️ 資料夾重新命名")
-        st.caption("💡 直接修改現有資料夾的名稱 (底下的子資料夾與考卷會跟著自動更新)")
+        st.subheader("🗂️ 整個資料夾階層更名與移動")
+        st.caption("💡 想要把整個 `生化` 移進 `大三` 變成 `大三/生化`？直接在下方修改完整路徑即可，所有子資料夾會自動跟隨！")
         try:
             all_folders_rename = get_all_folders()
             if all_folders_rename:
-                old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders_rename, key="rename_folder_select")
-                new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
-                if st.button("🚀 確認修改資料夾名稱", use_container_width=True):
+                old_folder_name = st.selectbox("📦 選擇要修改的資料夾：", all_folders_rename, key="rename_folder_select")
+                new_folder_name = st.text_input("✏️ 編輯完整路徑 (隨意增減上下層次)：", value=old_folder_name, key="rename_folder_input")
+                if st.button("🚀 執行結構修改", use_container_width=True):
                     if new_folder_name.strip() and new_folder_name.strip() != old_folder_name:
                         new_path_clean = new_folder_name.strip().replace('//', '/')
                         c.execute("SELECT DISTINCT folder FROM questions WHERE folder = ? OR folder LIKE ?", (old_folder_name, f"{old_folder_name}/%"))
@@ -1112,11 +1068,11 @@ with tab_settings:
                                 sub_path = f[len(old_folder_name):] 
                                 c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path_clean + sub_path, f))
                         conn.commit()
-                        st.success(f"✅ 資料夾已更名為「{new_path_clean}」！")
+                        st.success(f"✅ 整個資料夾結構已成功更新為「{new_path_clean}」！")
                         time.sleep(1)
                         st.rerun()
                     elif new_folder_name.strip() == old_folder_name:
-                        st.warning("名稱沒有變更喔！")
+                        st.warning("路徑沒有變更喔！")
                     else:
-                        st.warning("請輸入新名稱！")
+                        st.warning("請輸入新路徑！")
         except: pass
