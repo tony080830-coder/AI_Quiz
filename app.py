@@ -215,6 +215,12 @@ def get_question_bilingual(q, target_lang="en"):
         c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, json.dumps(trans_opts, ensure_ascii=False), q['id']))
         conn.commit()
         q[col_t], q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
+        
+        for mem_q in st.session_state.exam_questions_cache:
+            if mem_q['id'] == q['id']:
+                mem_q[col_t], mem_q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
+                break
+                
         return trans_text, trans_opts
     except: return orig_text, orig_opts
 
@@ -260,7 +266,7 @@ def extract_text_from_pptx(file_bytes):
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
 if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice"
-if 'exam_q_ids' not in st.session_state: st.session_state.exam_q_ids = []
+if 'exam_questions_cache' not in st.session_state: st.session_state.exam_questions_cache = []
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_user_answers' not in st.session_state: st.session_state.exam_user_answers = {}
 if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs = []
@@ -920,6 +926,7 @@ with tab_import:
             if st.button("🚀 智慧自動分批解析並匯入", type="primary") and ptext.strip():
                 api_key = get_api_key()
                 if api_key:
+                    # 🌟 純文字全自動分塊引擎
                     lines = ptext.split('\n')
                     chunk_size = 40
                     text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size)]
@@ -965,11 +972,60 @@ with tab_settings:
             st.success("設定已儲存！")
 
         st.divider()
-        st.subheader("📄 單一考卷管理 (更名 / 移動 / 刪除)")
+        st.subheader("📦 批次管理考卷 (多選移動 / 刪除)")
+        try:
+            c.execute("SELECT folder, category FROM questions GROUP BY folder, category")
+            all_items = c.fetchall()
+            all_folders = get_all_folders()
+            
+            item_options = [f"📂 {r['folder']} ＞ 📄 {r['category']}" for r in all_items]
+            selected_batch = st.multiselect("✅ 勾選你要處理的考卷 (支援一次全選或多選)：", item_options)
+            
+            if selected_batch:
+                st.info(f"已選取 {len(selected_batch)} 份考卷，請選擇下方動作：")
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    batch_target = st.selectbox("🎯 批次移動至資料夾：", all_folders + ["-- 輸入全新資料夾路徑 --"], key="batch_move_sel")
+                    batch_final_folder = batch_target
+                    if batch_target == "-- 輸入全新資料夾路徑 --":
+                        batch_final_folder = st.text_input("輸入全新路徑 (例如：大三/生化)：", key="batch_move_txt")
+                    
+                    if st.button("🚀 執行批次移動", type="primary", use_container_width=True):
+                        if batch_final_folder.strip():
+                            for sel in selected_batch:
+                                f_part, c_part = sel.split(" ＞ 📄 ")
+                                orig_f = f_part.replace("📂 ", "")
+                                orig_c = c_part
+                                c.execute("UPDATE questions SET folder=? WHERE folder=? AND category=?", (batch_final_folder.strip(), orig_f, orig_c))
+                            conn.commit()
+                            st.success(f"✅ 成功將 {len(selected_batch)} 份考卷移動至「{batch_final_folder.strip()}」！")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("請輸入目標資料夾名稱！")
+                            
+                with col_b2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🗑️ 批次刪除選取的考卷", use_container_width=True):
+                        for sel in selected_batch:
+                            f_part, c_part = sel.split(" ＞ 📄 ")
+                            orig_f = f_part.replace("📂 ", "")
+                            orig_c = c_part
+                            c.execute("DELETE FROM questions WHERE folder=? AND category=?", (orig_f, orig_c))
+                            c.execute("DELETE FROM exam_history WHERE category=?", (orig_c,))
+                        conn.commit()
+                        st.success(f"✅ 成功刪除 {len(selected_batch)} 份考卷！")
+                        time.sleep(1)
+                        st.rerun()
+        except Exception as e:
+            pass
+
+        st.divider()
+        st.subheader("📄 單一考卷詳細管理 (更名 / 星號 / 移動)")
         try:
             c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
             items = c.fetchall()
-            all_folders = get_all_folders()
             for index, row in enumerate(items):
                 f_name, p_name = row['folder'], row['category']
                 with st.expander(f"{'⭐ ' if bool(row['pdf_starred']) else ''}📂 {f_name} ＞ 📄 {p_name}"):
