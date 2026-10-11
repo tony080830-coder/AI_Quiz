@@ -215,12 +215,6 @@ def get_question_bilingual(q, target_lang="en"):
         c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, json.dumps(trans_opts, ensure_ascii=False), q['id']))
         conn.commit()
         q[col_t], q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
-        
-        for mem_q in st.session_state.exam_questions_cache:
-            if mem_q['id'] == q['id']:
-                mem_q[col_t], mem_q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
-                break
-                
         return trans_text, trans_opts
     except: return orig_text, orig_opts
 
@@ -266,7 +260,7 @@ def extract_text_from_pptx(file_bytes):
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
 if 'exam_finished' not in st.session_state: st.session_state.exam_finished = False
 if 'exam_mode' not in st.session_state: st.session_state.exam_mode = "practice"
-if 'exam_questions_cache' not in st.session_state: st.session_state.exam_questions_cache = []
+if 'exam_q_ids' not in st.session_state: st.session_state.exam_q_ids = []
 if 'exam_index' not in st.session_state: st.session_state.exam_index = 0
 if 'exam_user_answers' not in st.session_state: st.session_state.exam_user_answers = {}
 if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs = []
@@ -926,7 +920,6 @@ with tab_import:
             if st.button("🚀 智慧自動分批解析並匯入", type="primary") and ptext.strip():
                 api_key = get_api_key()
                 if api_key:
-                    # 🌟 純文字全自動分塊引擎
                     lines = ptext.split('\n')
                     chunk_size = 40
                     text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size)]
@@ -972,7 +965,7 @@ with tab_settings:
             st.success("設定已儲存！")
 
         st.divider()
-        st.subheader("📁 題庫名稱與刪除")
+        st.subheader("📄 單一考卷管理 (更名 / 移動 / 刪除)")
         try:
             c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
             items = c.fetchall()
@@ -980,11 +973,19 @@ with tab_settings:
             for index, row in enumerate(items):
                 f_name, p_name = row['folder'], row['category']
                 with st.expander(f"{'⭐ ' if bool(row['pdf_starred']) else ''}📂 {f_name} ＞ 📄 {p_name}"):
-                    new_p_name = st.text_input("修改考卷名稱", value=p_name, key=f"p_rename_{index}")
+                    new_p_name = st.text_input("📄 修改考卷名稱", value=p_name, key=f"p_rename_{index}")
+                    
+                    target_f = st.selectbox("📂 移動至現有資料夾", all_folders + ["-- 輸入全新資料夾路徑 --"], index=all_folders.index(f_name) if f_name in all_folders else 0, key=f"p_move_sel_{index}")
+                    final_folder = f_name
+                    if target_f == "-- 輸入全新資料夾路徑 --":
+                        final_folder = st.text_input("輸入全新資料夾路徑 (支援多層級，用 / 分隔)：", value=f_name, key=f"p_move_txt_{index}")
+                    else:
+                        final_folder = target_f
+
                     col_save, col_star_pdf, col_del = st.columns(3)
                     if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
-                        c.execute("UPDATE questions SET category=? WHERE folder=? AND category=?", (new_p_name, f_name, p_name))
-                        c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name, p_name))
+                        c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", (new_p_name.strip(), final_folder.strip(), f_name, p_name))
+                        c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name.strip(), p_name))
                         conn.commit(); st.rerun()
                     if col_star_pdf.button("⭐ 標記星號" if not bool(row['pdf_starred']) else "☆ 取消星號", key=f"star_pdf_{index}", use_container_width=True):
                         c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", (0 if bool(row['pdf_starred']) else 1, f_name, p_name))
@@ -995,7 +996,7 @@ with tab_settings:
         except: pass
 
         st.divider()
-        st.subheader("🗂️ 資料夾階層管理 (自由建立上下層子目錄)")
+        st.subheader("🗂️ 資料夾階層管理 (打包移動整個資料夾)")
         st.caption("💡 可將整個資料夾移入另一個資料夾，或直接輸入全新的多層級路徑（例如：大三/下學期/生化）")
         try:
             all_folders_hier = get_all_folders()
