@@ -926,7 +926,6 @@ with tab_import:
             if st.button("🚀 智慧自動分批解析並匯入", type="primary") and ptext.strip():
                 api_key = get_api_key()
                 if api_key:
-                    # 🌟 純文字全自動分塊引擎
                     lines = ptext.split('\n')
                     chunk_size = 40
                     text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size)]
@@ -1091,4 +1090,33 @@ with tab_settings:
                     st.success(f"✅ 已成功將資料夾移動至：{new_path}")
                     time.sleep(1)
                     st.rerun()
+        except: pass
+
+        st.divider()
+        st.subheader("✏️ 資料夾重新命名")
+        st.caption("💡 直接修改現有資料夾的名稱 (底下的子資料夾與考卷會跟著自動更新)")
+        try:
+            all_folders_rename = get_all_folders()
+            if all_folders_rename:
+                old_folder_name = st.selectbox("選擇要改名的資料夾", all_folders_rename, key="rename_folder_select")
+                new_folder_name = st.text_input("輸入新的資料夾名稱", value=old_folder_name, key="rename_folder_input")
+                if st.button("🚀 確認修改資料夾名稱", use_container_width=True):
+                    if new_folder_name.strip() and new_folder_name.strip() != old_folder_name:
+                        new_path_clean = new_folder_name.strip().replace('//', '/')
+                        c.execute("SELECT DISTINCT folder FROM questions WHERE folder = ? OR folder LIKE ?", (old_folder_name, f"{old_folder_name}/%"))
+                        folders_to_update = [row[0] for row in c.fetchall()]
+                        for f in folders_to_update:
+                            if f == old_folder_name:
+                                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path_clean, f))
+                            else:
+                                sub_path = f[len(old_folder_name):] 
+                                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path_clean + sub_path, f))
+                        conn.commit()
+                        st.success(f"✅ 資料夾已更名為「{new_path_clean}」！")
+                        time.sleep(1)
+                        st.rerun()
+                    elif new_folder_name.strip() == old_folder_name:
+                        st.warning("名稱沒有變更喔！")
+                    else:
+                        st.warning("請輸入新名稱！")
         except: pass
