@@ -10,6 +10,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from PIL import Image
 import google.generativeai as genai
+import concurrent.futures
 
 try:
     import pypdf
@@ -179,7 +180,7 @@ def get_question_options(q):
     return opts if opts else ["A", "B"]
 
 def is_primarily_english(text):
-    zh_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    zh_chars = len(re.findall(r'[一-鿿]', text))
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
@@ -216,7 +217,7 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 雙語切換處理引擎
+# 🌟 雙語切換處理引擎 (Gemini 3.8 Flash)
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -893,18 +894,15 @@ with tab_import:
             
         import_mode = st.radio("匯入方式：", ["📁 模式一：檔案上傳", "📋 模式二：純文字貼上 (自動分割長文)"])
         
-        # 🌟 超強極端排版防呆解析提示詞
-        parse_prompt = (
-            "你是一個強大的測驗題庫解析助手。請從下列文字中提取出所有的「選擇題」。\n"
-            "【極端排版處理指令】\n"
-            "1. 即使文字排版極度混亂、完全沒有換行、所有選項跟詳解全黏在一起，也必須利用語意分析精準切開！\n"
-            "2. text（題目）：提取題目敘述。\n"
-            '3. options（選項）：切割並還原所有選項為陣列，例如 ["(A) ...", "(B) ...", "(C) ...", "(D) ..."]。\n'
-            '4. answer（解答）：提取正確答案字母。\n'
-            '5. explanation（詳解）：提取解析，若無則留空字串 ""。\n'
-            "【輸出規範】嚴格只輸出 JSON 陣列，不包含任何 Markdown 標記！\n"
-            '範例：[{"text":"問題...","options":["(A)選項1","(B)選項2"],"answer":"A","explanation":"解析..."}]'
-        )
+        parse_prompt = """你是一個專業的測驗題庫解析助手。請從下列提供的文字中，精準提取出所有的「選擇題」。
+【極端排版容錯處理規則】
+1. 即使題目、選項 (A)(B)(C)(D)、答案、解析全部黏在同一行或完全沒有換行，也請利用語意分析精確分離出題目、各個選項、答案與解析！
+2. text：完整的題目問題敘述。
+3. options：將所有選項切開還原為陣列，例如 ["(A) ...", "(B) ...", "(C) ...", "(D) ..."]。
+4. answer：正確答案代號（例如 "A" 或 "D"）。若文字中有標註解答請直接填入。
+5. explanation：詳解或解析說明，若無則填空字串 ""。
+6. 格式要求：嚴格輸出 JSON 陣列 (Array)，絕對不要輸出任何前後 Markdown 標籤或說明文字！
+範例：[{"text":"題目敘述","options":["(A)選項1","(B)選項2","(C)選項3","(D)選項4"],"answer":"D","explanation":"解析"}]"""
 
         if import_mode.startswith("📁"):
             uploaded_file = st.file_uploader("上傳檔案", type=["pdf", "docx", "pptx", "txt", "md"])
@@ -949,24 +947,38 @@ with tab_import:
 
                     prog_bar, status_box = st.progress(0.0), st.empty()
                     total_imported = 0
-                    for b_idx, b_info in enumerate(batches):
-                        status_box.markdown(f"⏳ 處理 {b_info['title']}...")
+                    
+                    def process_file_chunk(b_content):
+                        genai.configure(api_key=api_key)
+                        model_thread = genai.GenerativeModel('gemini-3.8-flash')
                         for attempt in range(3):
                             try:
-                                resp = model.generate_content(b_info['content'], request_options={"timeout": 90})
+                                resp = model_thread.generate_content(b_content, request_options={"timeout": 90})
                                 raw = resp.text.strip()
-                                chunk_questions = extract_json_questions(raw)
+                                return extract_json_questions(raw)
+                            except Exception as e: 
+                                time.sleep(3)
+                        return []
 
+                    status_box.markdown(f"🚀 啟動多執行緒引擎，平行處理 {len(batches)} 個區塊...")
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                        futures = {executor.submit(process_file_chunk, b['content']): b for b in batches}
+                        completed = 0
+                        for future in concurrent.futures.as_completed(futures):
+                            chunk_questions = future.result()
+                            if chunk_questions:
                                 for nq in chunk_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
                                     c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
                                 conn.commit()
                                 total_imported += len(chunk_questions)
-                                break
-                            except Exception as e: 
-                                time.sleep(3)
-                        prog_bar.progress((b_idx + 1) / len(batches))
+                            
+                            completed += 1
+                            prog_bar.progress(completed / len(batches))
+                            status_box.markdown(f"⏳ 平行解析進度 [{completed}/{len(batches)}] ...")
+                            
                     if total_imported > 0: st.success(f"🎉 成功存入 {total_imported} 題！")
         else:
             paste_category_name = st.text_input("📄 為這批題目命名考卷/講義名稱：", value="未命名考卷")
@@ -980,38 +992,46 @@ with tab_import:
                         text_batches = [ptext]
                     else:
                         lines = ptext.split('\n')
-                        chunk_size = 40
+                        chunk_size = 100 
                         text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size) if '\n'.join(lines[i:i+chunk_size]).strip()]
 
                     prog_bar, status_box = st.progress(0.0), st.empty()
                     total_imported = 0
                     errors_encountered = []
                     
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-3.8-flash')
-                    
-                    for b_idx, batch_text in enumerate(text_batches):
-                        status_box.markdown(f"⏳ 正在分析純文字區塊 [{b_idx+1}/{len(text_batches)}] ...")
-                        if not batch_text.strip(): continue
+                    def process_text_chunk(batch_text):
+                        genai.configure(api_key=api_key)
+                        model_thread = genai.GenerativeModel('gemini-3.8-flash')
                         for attempt in range(3):
                             try:
-                                resp = model.generate_content([parse_prompt, batch_text], request_options={"timeout": 60})
+                                resp = model_thread.generate_content([parse_prompt, batch_text], request_options={"timeout": 60})
                                 raw = resp.text.strip()
-                                new_questions = extract_json_questions(raw)
-                                
-                                if new_questions:
-                                    for nq in new_questions:
-                                        raw_opts = nq.get('options', [])
-                                        opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
-                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                    conn.commit()
-                                    total_imported += len(new_questions)
-                                    break
+                                return extract_json_questions(raw)
                             except Exception as e: 
-                                errors_encountered.append(str(e))
                                 time.sleep(2)
-                        prog_bar.progress((b_idx + 1) / len(text_batches))
+                        return None
+                        
+                    status_box.markdown(f"🚀 啟動多執行緒引擎，平行處理 {len(text_batches)} 個區塊...")
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                        futures = {executor.submit(process_text_chunk, bt): bt for bt in text_batches}
+                        completed = 0
+                        for future in concurrent.futures.as_completed(futures):
+                            new_questions = future.result()
+                            if new_questions is None:
+                                errors_encountered.append("超時")
+                            elif new_questions:
+                                for nq in new_questions:
+                                    raw_opts = nq.get('options', [])
+                                    opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                    opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                                conn.commit()
+                                total_imported += len(new_questions)
+                                
+                            completed += 1
+                            prog_bar.progress(completed / len(text_batches))
+                            status_box.markdown(f"⏳ 平行解析進度 [{completed}/{len(text_batches)}] ...")
                     
                     status_box.empty()
                     prog_bar.empty()
@@ -1021,7 +1041,7 @@ with tab_import:
                         st.rerun()
                     else:
                         if errors_encountered:
-                            st.error(f"⚠️ 解析失敗，API 回傳錯誤：{errors_encountered[-1]}")
+                            st.error("⚠️ 解析失敗，部分區塊 API 發生超時。")
                         else:
                             st.warning("⚠️ 未能從貼上的文字中辨識出選擇題格式，請確認內容是否包含選項。")
 
