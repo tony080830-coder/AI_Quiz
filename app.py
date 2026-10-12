@@ -108,9 +108,9 @@ c = conn.cursor()
 
 if '_db_schema_ready' not in st.session_state:
     try:
-        c.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, text TEXT, opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, answer TEXT, wrong_count INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS exam_history (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, wrong_ids TEXT, correct_ids TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute("CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, text TEXT, opt1 TEXT, opt2 TEXT, opt3 TEXT, opt4 TEXT, answer TEXT, wrong_count INTEGER DEFAULT 0)")
+        c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS exam_history (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, wrong_ids TEXT, correct_ids TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
         c.execute("PRAGMA table_info(questions)")
         existing_cols = [col['name'] for col in c.fetchall()]
         for col_name in ['explanation', 'folder', 'is_starred', 'pdf_starred', 'options', 'explanation_image', 'text_en', 'options_en', 'text_zh', 'options_zh']:
@@ -183,6 +183,40 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
+def extract_json_questions(raw_text):
+    raw = raw_text.strip()
+    try:
+        data = json.loads(raw)
+        return [data] if isinstance(data, dict) else data
+    except:
+        pass
+    
+    match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
+    if match_arr:
+        try:
+            return json.loads(match_arr.group(0))
+        except:
+            pass
+            
+    match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match_obj:
+        try:
+            data = json.loads(match_obj.group(0))
+            return [data] if isinstance(data, dict) else data
+        except:
+            pass
+
+    clean = re.sub(r'```(?:json)?', '', raw)
+    clean = re.sub(r'```', '', clean).strip()
+    try:
+        data = json.loads(clean)
+        return [data] if isinstance(data, dict) else data
+    except:
+        pass
+        
+    return []
+
+# 🌟 雙語切換處理引擎
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -207,11 +241,11 @@ def get_question_bilingual(q, target_lang="en"):
         prompt = f'請將以下醫學/生化選擇題翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n【規範】以標準 JSON 格式輸出：\n{{"text": "翻譯後的題目", "options": ["選項1", "選項2", ...]}}'
         resp = model.generate_content(prompt, request_options={"timeout": 45})
         raw = resp.text.strip()
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        clean_json = match.group(0) if match else raw.replace('```json', '').replace('```', '').strip()
-        parsed = json.loads(clean_json)
+        parsed_list = extract_json_questions(raw)
+        parsed = parsed_list[0] if parsed_list else {}
         
-        trans_text, trans_opts = parsed.get('text', orig_text), parsed.get('options', orig_opts)
+        trans_text = parsed.get('text', orig_text)
+        trans_opts = parsed.get('options', orig_opts)
         c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, json.dumps(trans_opts, ensure_ascii=False), q['id']))
         conn.commit()
         q[col_t], q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
@@ -818,8 +852,8 @@ with tab_ai_gen:
                                 ai_prompt = f"Analyze these questions from '{gen_target_pdf}':\n{sample_context}\n\nTASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\nRULES:\n1. Options in English (4 or 5 choices).\n2. Provide best answer.\n3. Explanation in Traditional Chinese.\n4. Output JSON array only:\n" + '[{"text": "...", "options": ["A. ...", "B. ..."], "answer": "A", "explanation": "..."}]'
                                 resp = genai.GenerativeModel('gemini-3.8-flash').generate_content(ai_prompt, request_options={"timeout": 120})
                                 raw = resp.text.strip()
-                                match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-                                st.session_state.ai_generated_temp = json.loads(match.group(0) if match else raw.replace('```json', '').replace('```', '').strip())
+                                parsed_list = extract_json_questions(raw)
+                                st.session_state.ai_generated_temp = parsed_list
                                 st.toast("🎉 生成完畢！")
                             except Exception as e: st.error(f"失敗：{e}")
 
@@ -859,16 +893,16 @@ with tab_import:
             
         import_mode = st.radio("匯入方式：", ["📁 模式一：檔案上傳", "📋 模式二：純文字貼上 (自動分割長文)"])
         
-        # 🌟 超強容錯 Prompt，專治「無換行、黏在一起」的亂碼文字
+        # 🌟 超強極端排版防呆解析提示詞
         parse_prompt = (
-            "你是一個專業的測驗題庫解析助手。請從下列提供的內容中提取出所有的「選擇題」。\n"
-            "【重要處理規則】\n"
-            "1. 容錯解析：即使文字排版混亂、沒有換行、題目與選項全部黏在同一段落，也請利用語意分析精準切割出題目、各個選項、答案與詳解。\n"
-            "2. text（題目）：完整保留題目敘述。\n"
-            "3. options（選項）：務必把所有選項切開放入陣列，例如 [\"(A) ...\", \"(B) ...\", \"(C) ...\", \"(D) ...\"]。\n"
-            "4. answer（解答）：提取正確答案字母或內容。\n"
-            "5. explanation（詳解）：提取解析說明，若無則留空字串 \"\"。\n"
-            "6. 無論找到幾題，【嚴格以 JSON 陣列 (Array)】格式輸出！絕對不要輸出任何 Markdown 標籤 (例如 ```json) 或其他說明文字。\n"
+            "你是一個強大的測驗題庫解析助手。請從下列文字中提取出所有的「選擇題」。\n"
+            "【極端排版處理指令】\n"
+            "1. 即使文字排版極度混亂、完全沒有換行、所有選項跟詳解全黏在一起，也必須利用語意分析精準切開！\n"
+            "2. text（題目）：提取題目敘述。\n"
+            '3. options（選項）：切割並還原所有選項為陣列，例如 ["(A) ...", "(B) ...", "(C) ...", "(D) ..."]。\n'
+            '4. answer（解答）：提取正確答案字母。\n'
+            '5. explanation（詳解）：提取解析，若無則留空字串 ""。\n'
+            "【輸出規範】嚴格只輸出 JSON 陣列，不包含任何 Markdown 標記！\n"
             '範例：[{"text":"問題...","options":["(A)選項1","(B)選項2"],"answer":"A","explanation":"解析..."}]'
         )
 
@@ -921,23 +955,7 @@ with tab_import:
                             try:
                                 resp = model.generate_content(b_info['content'], request_options={"timeout": 90})
                                 raw = resp.text.strip()
-                                
-                                # 🌟 防彈 JSON 解析機制
-                                match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-                                match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
-                                
-                                if match_arr:
-                                    chunk_questions = json.loads(match_arr.group(0))
-                                elif match_obj:
-                                    chunk_questions = [json.loads(match_obj.group(0))]
-                                else:
-                                    clean_json = raw.replace('```json', '').replace('```', '').strip()
-                                    if clean_json.startswith('{') and clean_json.endswith('}'):
-                                        clean_json = f"[{clean_json}]"
-                                    chunk_questions = json.loads(clean_json) if clean_json else []
-                                    
-                                if isinstance(chunk_questions, dict):
-                                    chunk_questions = [chunk_questions]
+                                chunk_questions = extract_json_questions(raw)
 
                                 for nq in chunk_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
@@ -946,21 +964,28 @@ with tab_import:
                                 conn.commit()
                                 total_imported += len(chunk_questions)
                                 break
-                            except: time.sleep(5)
+                            except Exception as e: 
+                                time.sleep(3)
                         prog_bar.progress((b_idx + 1) / len(batches))
                     if total_imported > 0: st.success(f"🎉 成功存入 {total_imported} 題！")
         else:
             paste_category_name = st.text_input("📄 為這批題目命名考卷/講義名稱：", value="未命名考卷")
-            ptext = st.text_area("請在此貼上大量題目文字 (系統將自動幫您每 40 行分批解析)：", height=250)
+            ptext = st.text_area("請在此貼上大量題目文字 (系統將自動分析並切分題目與選項)：", height=250)
             if st.button("🚀 智慧自動分批解析並匯入", type="primary") and ptext.strip():
                 api_key = get_api_key()
-                if api_key:
-                    lines = ptext.split('\n')
-                    chunk_size = 40
-                    text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size)]
-                    
+                if not api_key:
+                    st.error("請先前往「⚙️ 設定」輸入 Gemini API Key！")
+                else:
+                    if len(ptext) <= 4000:
+                        text_batches = [ptext]
+                    else:
+                        lines = ptext.split('\n')
+                        chunk_size = 40
+                        text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size) if '\n'.join(lines[i:i+chunk_size]).strip()]
+
                     prog_bar, status_box = st.progress(0.0), st.empty()
                     total_imported = 0
+                    errors_encountered = []
                     
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel('gemini-3.8-flash')
@@ -972,35 +997,33 @@ with tab_import:
                             try:
                                 resp = model.generate_content([parse_prompt, batch_text], request_options={"timeout": 60})
                                 raw = resp.text.strip()
+                                new_questions = extract_json_questions(raw)
                                 
-                                # 🌟 防彈 JSON 解析機制
-                                match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-                                match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
-                                
-                                if match_arr:
-                                    new_questions = json.loads(match_arr.group(0))
-                                elif match_obj:
-                                    new_questions = [json.loads(match_obj.group(0))]
-                                else:
-                                    clean_json = raw.replace('```json', '').replace('```', '').strip()
-                                    if clean_json.startswith('{') and clean_json.endswith('}'):
-                                        clean_json = f"[{clean_json}]"
-                                    new_questions = json.loads(clean_json) if clean_json else []
-                                    
-                                if isinstance(new_questions, dict):
-                                    new_questions = [new_questions]
-                                
-                                for nq in new_questions:
-                                    opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
-                                    opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                conn.commit()
-                                total_imported += len(new_questions)
-                                break
-                            except: time.sleep(3)
+                                if new_questions:
+                                    for nq in new_questions:
+                                        raw_opts = nq.get('options', [])
+                                        opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                                    conn.commit()
+                                    total_imported += len(new_questions)
+                                    break
+                            except Exception as e: 
+                                errors_encountered.append(str(e))
+                                time.sleep(2)
                         prog_bar.progress((b_idx + 1) / len(text_batches))
                     
-                    st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
+                    status_box.empty()
+                    prog_bar.empty()
+                    if total_imported > 0:
+                        st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        if errors_encountered:
+                            st.error(f"⚠️ 解析失敗，API 回傳錯誤：{errors_encountered[-1]}")
+                        else:
+                            st.warning("⚠️ 未能從貼上的文字中辨識出選擇題格式，請確認內容是否包含選項。")
 
 # ---------- 【⚙️ 分頁六：設定與管理區】 ----------
 with tab_settings:
