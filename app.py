@@ -19,7 +19,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE3Mzg2NzYsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.utWn4ozf8qHfcZnJ_cZCylsqLuik7mJAjaysUpdLu7tk3Val9s1p1bHfqf0pnXUXHd8MTgWgZbUa4OyaSSC3CA"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE3NzQ4NTUsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.4euee5yIb6AvxB5jlKPkdXUNZAbyH5RPCwMK76rc28CZ6licJIQNk9pps658Gwl50xjJZyrYLib4-okUb0R1Bg"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -858,7 +858,19 @@ with tab_import:
             target_folder = folder_choice
             
         import_mode = st.radio("匯入方式：", ["📁 模式一：檔案上傳", "📋 模式二：純文字貼上 (自動分割長文)"])
-        parse_prompt = "請提取所有的選擇題。嚴格輸出 JSON 陣列：\n" + '[{"text":"...","options":["A","B","C"],"answer":"A","explanation":""}]'
+        
+        # 🌟 超強容錯 Prompt，專治「無換行、黏在一起」的亂碼文字
+        parse_prompt = (
+            "你是一個專業的測驗題庫解析助手。請從下列提供的內容中提取出所有的「選擇題」。\n"
+            "【重要處理規則】\n"
+            "1. 容錯解析：即使文字排版混亂、沒有換行、題目與選項全部黏在同一段落，也請利用語意分析精準切割出題目、各個選項、答案與詳解。\n"
+            "2. text（題目）：完整保留題目敘述。\n"
+            "3. options（選項）：務必把所有選項切開放入陣列，例如 [\"(A) ...\", \"(B) ...\", \"(C) ...\", \"(D) ...\"]。\n"
+            "4. answer（解答）：提取正確答案字母或內容。\n"
+            "5. explanation（詳解）：提取解析說明，若無則留空字串 \"\"。\n"
+            "6. 無論找到幾題，【嚴格以 JSON 陣列 (Array)】格式輸出！絕對不要輸出任何 Markdown 標籤 (例如 ```json) 或其他說明文字。\n"
+            '範例：[{"text":"問題...","options":["(A)選項1","(B)選項2"],"answer":"A","explanation":"解析..."}]'
+        )
 
         if import_mode.startswith("📁"):
             uploaded_file = st.file_uploader("上傳檔案", type=["pdf", "docx", "pptx", "txt", "md"])
@@ -909,8 +921,24 @@ with tab_import:
                             try:
                                 resp = model.generate_content(b_info['content'], request_options={"timeout": 90})
                                 raw = resp.text.strip()
-                                match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-                                chunk_questions = json.loads(match.group(0) if match else raw.replace('```json', '').replace('```', '').strip())
+                                
+                                # 🌟 防彈 JSON 解析機制
+                                match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
+                                match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
+                                
+                                if match_arr:
+                                    chunk_questions = json.loads(match_arr.group(0))
+                                elif match_obj:
+                                    chunk_questions = [json.loads(match_obj.group(0))]
+                                else:
+                                    clean_json = raw.replace('```json', '').replace('```', '').strip()
+                                    if clean_json.startswith('{') and clean_json.endswith('}'):
+                                        clean_json = f"[{clean_json}]"
+                                    chunk_questions = json.loads(clean_json) if clean_json else []
+                                    
+                                if isinstance(chunk_questions, dict):
+                                    chunk_questions = [chunk_questions]
+
                                 for nq in chunk_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
@@ -944,8 +972,23 @@ with tab_import:
                             try:
                                 resp = model.generate_content([parse_prompt, batch_text], request_options={"timeout": 60})
                                 raw = resp.text.strip()
-                                match = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
-                                new_questions = json.loads(match.group(0) if match else raw.replace('```json', '').replace('```', '').strip())
+                                
+                                # 🌟 防彈 JSON 解析機制
+                                match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
+                                match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
+                                
+                                if match_arr:
+                                    new_questions = json.loads(match_arr.group(0))
+                                elif match_obj:
+                                    new_questions = [json.loads(match_obj.group(0))]
+                                else:
+                                    clean_json = raw.replace('```json', '').replace('```', '').strip()
+                                    if clean_json.startswith('{') and clean_json.endswith('}'):
+                                        clean_json = f"[{clean_json}]"
+                                    new_questions = json.loads(clean_json) if clean_json else []
+                                    
+                                if isinstance(new_questions, dict):
+                                    new_questions = [new_questions]
                                 
                                 for nq in new_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
