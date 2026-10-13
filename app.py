@@ -20,7 +20,7 @@ except ImportError:
 
 # ================= 0. Turso 雲端 SQLite 連線設定 =================
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
-TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE3NzQ4NTUsImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.4euee5yIb6AvxB5jlKPkdXUNZAbyH5RPCwMK76rc28CZ6licJIQNk9pps658Gwl50xjJZyrYLib4-okUb0R1Bg"
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE4NzkzMDksImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.6jTw0MrLdAEMzRubZj0lqOaZwS3X3oDzbgP707x6qEXXbuCXgxdgA9MmEjQfxYomwujYU5oW41kTUSKvE3e0Bw"
 
 class RowDict(dict):
     def __getitem__(self, item):
@@ -217,7 +217,7 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 雙語切換處理引擎 (Gemini 3.8 Flash)
+# 🌟 雙語切換處理引擎
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -894,15 +894,17 @@ with tab_import:
             
         import_mode = st.radio("匯入方式：", ["📁 模式一：檔案上傳", "📋 模式二：純文字貼上 (自動分割長文)"])
         
-        parse_prompt = """你是一個專業的測驗題庫解析助手。請從下列提供的文字中，精準提取出所有的「選擇題」。
-【極端排版容錯處理規則】
-1. 即使題目、選項 (A)(B)(C)(D)、答案、解析全部黏在同一行或完全沒有換行，也請利用語意分析精確分離出題目、各個選項、答案與解析！
-2. text：完整的題目問題敘述。
-3. options：將所有選項切開還原為陣列，例如 ["(A) ...", "(B) ...", "(C) ...", "(D) ..."]。
-4. answer：正確答案代號（例如 "A" 或 "D"）。若文字中有標註解答請直接填入。
-5. explanation：詳解或解析說明，若無則填空字串 ""。
-6. 格式要求：嚴格輸出 JSON 陣列 (Array)，絕對不要輸出任何前後 Markdown 標籤或說明文字！
-範例：[{"text":"題目敘述","options":["(A)選項1","(B)選項2","(C)選項3","(D)選項4"],"answer":"D","explanation":"解析"}]"""
+        parse_prompt = (
+            "你是一個專業的測驗題庫解析助手。請從下列提供的文字中，精準提取出所有的「選擇題」。\n"
+            "【極端排版容錯處理規則】\n"
+            "1. 即使題目、選項 (A)(B)(C)(D)、答案、解析全部黏在同一行或完全沒有換行，也請利用語意分析精確分離出題目、各個選項、答案與解析！\n"
+            "2. text：完整的題目問題敘述。\n"
+            "3. options：將所有選項切開還原為陣列，例如 [\"(A) ...\", \"(B) ...\", \"(C) ...\", \"(D) ...\"]。\n"
+            "4. answer：正確答案代號（例如 \"A\" 或 \"D\"）。若文字中有標註解答請直接填入。\n"
+            "5. explanation：詳解或解析說明，若無則填空字串 \"\"。\n"
+            "6. 格式要求：嚴格輸出 JSON 陣列 (Array)，絕對不要輸出任何前後 Markdown 標籤或說明文字！\n"
+            '範例：[{"text":"題目敘述","options":["(A)選項1","(B)選項2","(C)選項3","(D)選項4"],"answer":"D","explanation":"解析"}]'
+        )
 
         if import_mode.startswith("📁"):
             uploaded_file = st.file_uploader("上傳檔案", type=["pdf", "docx", "pptx", "txt", "md"])
@@ -918,7 +920,6 @@ with tab_import:
                     file_bytes = uploaded_file.getvalue()
                     final_name = custom_name.strip() if custom_name else uploaded_file.name
                     genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-3.8-flash')
                     batches = []
                     
                     if fname.endswith('.pdf'):
@@ -947,27 +948,32 @@ with tab_import:
 
                     prog_bar, status_box = st.progress(0.0), st.empty()
                     total_imported = 0
+                    errors_encountered = []
                     
                     def process_file_chunk(b_content):
                         genai.configure(api_key=api_key)
                         model_thread = genai.GenerativeModel('gemini-3.8-flash')
+                        last_err = ""
                         for attempt in range(3):
                             try:
-                                resp = model_thread.generate_content(b_content, request_options={"timeout": 90})
+                                resp = model_thread.generate_content(b_content, request_options={"timeout": 120})
                                 raw = resp.text.strip()
-                                return extract_json_questions(raw)
+                                return extract_json_questions(raw), None
                             except Exception as e: 
-                                time.sleep(3)
-                        return []
+                                last_err = str(e)
+                                time.sleep(5)
+                        return None, last_err
 
                     status_box.markdown(f"🚀 啟動多執行緒引擎，平行處理 {len(batches)} 個區塊...")
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                         futures = {executor.submit(process_file_chunk, b['content']): b for b in batches}
                         completed = 0
                         for future in concurrent.futures.as_completed(futures):
-                            chunk_questions = future.result()
-                            if chunk_questions:
+                            chunk_questions, err_msg = future.result()
+                            if err_msg:
+                                errors_encountered.append(err_msg)
+                            elif chunk_questions:
                                 for nq in chunk_questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
@@ -979,7 +985,17 @@ with tab_import:
                             prog_bar.progress(completed / len(batches))
                             status_box.markdown(f"⏳ 平行解析進度 [{completed}/{len(batches)}] ...")
                             
-                    if total_imported > 0: st.success(f"🎉 成功存入 {total_imported} 題！")
+                    status_box.empty()
+                    prog_bar.empty()
+                    if total_imported > 0:
+                        st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        if errors_encountered:
+                            st.error(f"⚠️ 解析失敗，API 詳細錯誤訊息：{errors_encountered[-1]}")
+                        else:
+                            st.warning("⚠️ 未能從檔案中辨識出選擇題格式，請確認內容。")
         else:
             paste_category_name = st.text_input("📄 為這批題目命名考卷/講義名稱：", value="未命名考卷")
             ptext = st.text_area("請在此貼上大量題目文字 (系統將自動分析並切分題目與選項)：", height=250)
@@ -992,7 +1008,7 @@ with tab_import:
                         text_batches = [ptext]
                     else:
                         lines = ptext.split('\n')
-                        chunk_size = 100 
+                        chunk_size = 50 
                         text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size) if '\n'.join(lines[i:i+chunk_size]).strip()]
 
                     prog_bar, status_box = st.progress(0.0), st.empty()
@@ -1002,24 +1018,26 @@ with tab_import:
                     def process_text_chunk(batch_text):
                         genai.configure(api_key=api_key)
                         model_thread = genai.GenerativeModel('gemini-3.8-flash')
+                        last_err = ""
                         for attempt in range(3):
                             try:
-                                resp = model_thread.generate_content([parse_prompt, batch_text], request_options={"timeout": 60})
+                                resp = model_thread.generate_content([parse_prompt, batch_text], request_options={"timeout": 120})
                                 raw = resp.text.strip()
-                                return extract_json_questions(raw)
+                                return extract_json_questions(raw), None
                             except Exception as e: 
-                                time.sleep(2)
-                        return None
+                                last_err = str(e)
+                                time.sleep(5)
+                        return None, last_err
                         
-                    status_box.markdown(f"🚀 啟動多執行緒引擎，平行處理 {len(text_batches)} 個區塊...")
+                    status_box.markdown(f"🚀 啟動防呆解析引擎，處理 {len(text_batches)} 個區塊...")
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                         futures = {executor.submit(process_text_chunk, bt): bt for bt in text_batches}
                         completed = 0
                         for future in concurrent.futures.as_completed(futures):
-                            new_questions = future.result()
-                            if new_questions is None:
-                                errors_encountered.append("超時")
+                            new_questions, err_msg = future.result()
+                            if err_msg:
+                                errors_encountered.append(err_msg)
                             elif new_questions:
                                 for nq in new_questions:
                                     raw_opts = nq.get('options', [])
@@ -1041,7 +1059,7 @@ with tab_import:
                         st.rerun()
                     else:
                         if errors_encountered:
-                            st.error("⚠️ 解析失敗，部分區塊 API 發生超時。")
+                            st.error(f"⚠️ 解析失敗，API 詳細錯誤訊息：{errors_encountered[-1]}")
                         else:
                             st.warning("⚠️ 未能從貼上的文字中辨識出選擇題格式，請確認內容是否包含選項。")
 
