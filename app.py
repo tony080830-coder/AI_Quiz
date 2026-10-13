@@ -183,84 +183,89 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 單題專用深度剖析器（專治黏連排版、無空格選項）
+# 🌟 單題專用深度剖析器（專解 Question 13、Correct Answer、中文簡析、無空格黏連）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
 
-    # 1. 抓取答案 (Answer)
+    # 1. 抓取答案 (Answer)：支援 Correct Answer: A)、解答：A、答案：A 等
     ans = ""
-    m_ans = re.search(r'(?:解答|答案|正解|Ans|Key)\s*[:：\s]*([A-Ea-e])\b', b, re.IGNORECASE)
+    ans_pattern = r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])(?=[\)）\s\.\、\:]|$)'
+    m_ans = re.search(ans_pattern, b, re.IGNORECASE)
     if m_ans:
         ans = m_ans.group(1).upper()
-    else:
-        m_ans_bracket = re.search(r'(?:解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]([A-Ea-e])[\)）]', b, re.IGNORECASE)
-        if m_ans_bracket:
-            ans = m_ans_bracket.group(1).upper()
 
-    # 2. 抓取解析 (Explanation)
+    # 2. 抓取解析 (Explanation)：支援 中文簡析、簡析、解析、詳解
     exp = ""
-    m_exp = re.search(r'(?:解析|詳解|說明|Explanation)\s*[:：\s]*([\s\S]*)$', b, re.IGNORECASE)
+    exp_pattern = r'(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
+    m_exp = re.search(exp_pattern, b, re.IGNORECASE)
     if m_exp:
         exp = m_exp.group(1).strip()
 
-    # 3. 移除答案與解析，取得題目與選項主幹
+    # 3. 確定題目與選項的主幹範圍 (切掉後續的答案與解析)
     pos_ans = m_ans.start() if m_ans else len(b)
     pos_exp = m_exp.start() if m_exp else len(b)
     earliest_meta = min(pos_ans, pos_exp)
     q_opts_part = b[:earliest_meta].strip()
 
-    # 4. 順序剖析 A -> B -> C -> D (容忍任何前綴黏連)
-    m_A = re.search(r'(?:[\(（]A[\)）]|A[\.\、\)])\s*', q_opts_part, re.IGNORECASE)
-    if not m_A:
+    # 4. 尋找選項 A, B, C, D (及可選的 E)
+    def find_markers(text, letter):
+        pat = r'(?:[\(（]' + letter + r'[\)）]|' + letter + r'[\)）\.\、\:\：])\s*'
+        return list(re.finditer(pat, text, re.IGNORECASE))
+
+    A_matches = find_markers(q_opts_part, 'A')
+    B_matches = find_markers(q_opts_part, 'B')
+    C_matches = find_markers(q_opts_part, 'C')
+    D_matches = find_markers(q_opts_part, 'D')
+    E_matches = find_markers(q_opts_part, 'E')
+
+    chosen_A = chosen_B = chosen_C = chosen_D = chosen_E = None
+
+    for ma in A_matches:
+        mb_cand = [mb for mb in B_matches if mb.start() > ma.end()]
+        if not mb_cand: continue
+        mb = mb_cand[0]
+
+        mc_cand = [mc for mc in C_matches if mc.start() > mb.end()]
+        if not mc_cand: continue
+        mc = mc_cand[0]
+
+        chosen_A, chosen_B, chosen_C = ma, mb, mc
+
+        md_cand = [md for md in D_matches if md.start() > mc.end()]
+        if md_cand:
+            chosen_D = md_cand[0]
+            me_cand = [me for me in E_matches if me.start() > chosen_D.end()]
+            if me_cand:
+                chosen_E = me_cand[0]
+        break
+
+    if not chosen_A or not chosen_B or not chosen_C:
         return None
-    pos_A = m_A.start()
-    len_A = m_A.end() - m_A.start()
 
-    sub_B = q_opts_part[pos_A + len_A:]
-    m_B = re.search(r'(?:[\(（]B[\)）]|B[\.\、\)])\s*', sub_B, re.IGNORECASE)
-    if not m_B:
-        return None
-    pos_B = pos_A + len_A + m_B.start()
-    len_B = m_B.end() - m_B.start()
+    # 5. 提取題幹並清理題號
+    stem = q_opts_part[:chosen_A.start()].strip()
+    # 支援 Question 13、Question 15、22-27.、1. 等開頭清理
+    stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]?|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]]\s*)[\s\.\、\:\–\-]*', '', stem).strip()
 
-    sub_C = q_opts_part[pos_B + len_B:]
-    m_C = re.search(r'(?:[\(（]C[\)）]|C[\.\、\)])\s*', sub_C, re.IGNORECASE)
-    if not m_C:
-        return None
-    pos_C = pos_B + len_B + m_C.start()
-    len_C = m_C.end() - m_C.start()
+    opt_A = q_opts_part[chosen_A.end() : chosen_B.start()].strip()
+    opt_B = q_opts_part[chosen_B.end() : chosen_C.start()].strip()
+    options = [f"(A) {opt_A}", f"(B) {opt_B}"]
 
-    sub_D = q_opts_part[pos_C + len_C:]
-    m_D = re.search(r'(?:[\(（]D[\)）]|D[\.\、\)])\s*', sub_D, re.IGNORECASE)
-    pos_D = pos_C + len_C + m_D.start() if m_D else len(q_opts_part)
-    len_D = m_D.end() - m_D.start() if m_D else 0
-
-    pos_E = len(q_opts_part)
-    len_E = 0
-    if m_D:
-        sub_E = q_opts_part[pos_D + len_D:]
-        m_E = re.search(r'(?:[\(（]E[\)）]|E[\.\、\)])\s*', sub_E, re.IGNORECASE)
-        if m_E:
-            pos_E = pos_D + len_D + m_E.start()
-            len_E = m_E.end() - m_E.start()
-
-    # 5. 提取題幹與各選項內容
-    stem = q_opts_part[:pos_A].strip()
-    # 移除開頭題號（支援 22-27. 或 Q1. 或 1.）
-    stem = re.sub(r'^(?:(?:[Qq]|第\s*)?(\d+(?:[-_.]\d+)?)\s*[\.、\:\)）\s]+|[\(（\[](\d+(?:[-_.]\d+)?)[\)）\]]\s*)', '', stem).strip()
-
-    opt_A = q_opts_part[pos_A + len_A : pos_B].strip()
-    opt_B = q_opts_part[pos_B + len_B : pos_C].strip()
-    opt_C = q_opts_part[pos_C + len_C : pos_D].strip()
-    opt_D = q_opts_part[pos_D + len_D : pos_E].strip() if m_D else ""
-
-    options = [f"(A) {opt_A}", f"(B) {opt_B}", f"(C) {opt_C}"]
-    if opt_D:
-        options.append(f"(D) {opt_D}")
-    if len_E > 0:
-        opt_E = q_opts_part[pos_E + len_E:].strip()
-        options.append(f"(E) {opt_E}")
+    if chosen_D:
+        opt_C = q_opts_part[chosen_C.end() : chosen_D.start()].strip()
+        options.append(f"(C) {opt_C}")
+        if chosen_E:
+            opt_D = q_opts_part[chosen_D.end() : chosen_E.start()].strip()
+            opt_E = q_opts_part[chosen_E.end():].strip()
+            options.append(f"(D) {opt_D}")
+            options.append(f"(E) {opt_E}")
+        else:
+            opt_D = q_opts_part[chosen_D.end():].strip()
+            options.append(f"(D) {opt_D}")
+    else:
+        opt_C = q_opts_part[chosen_C.end():].strip()
+        options.append(f"(C) {opt_C}")
 
     if not ans:
         ans = "A"
@@ -272,25 +277,29 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（精準識別連字號題號 22-27. 並完整還原所有題目）
+# 🌟 全文全自動切題引擎（精確辨別 Question 13、22-27. 等，支援長文無換行黏連）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配題號起點：支援 22-27. / 22-28. / 1. / Q1. 等
-    q_split_regex = r'(?:(?<=[\s。！？；\n])|^)\s*(?:(?:[Qq]|第\s*)?(\d+(?:[-_]\d+)?)\s*[\.、\:\)）]|[\(（\[](\d+(?:[-_]\d+)?)[\)）\]]\s*)'
-    found_splits = list(re.finditer(q_split_regex, text))
+    # 正則匹配題目起點：Question 13 / 22-27. / 1. / 第1題 等
+    q_start_regex = r'(?:(?<=[\s\n\r。！？；，,])|^)\s*(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
+    splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
-    if len(found_splits) >= 2:
-        for i in range(len(found_splits)):
-            start = found_splits[i].start()
-            end = found_splits[i+1].start() if i + 1 < len(found_splits) else len(text)
+    if len(splits) >= 2:
+        if splits[0].start() > 0:
+            pre_block = text[:splits[0].start()].strip()
+            if pre_block:
+                blocks.append(pre_block)
+
+        for i in range(len(splits)):
+            start = splits[i].start()
+            end = splits[i+1].start() if i + 1 < len(splits) else len(text)
             blocks.append(text[start:end].strip())
     else:
-        # 單題或無明顯規律時退回段落分割
         blocks = [b.strip() for b in text.split('\n\n') if len(b.strip()) > 10]
         if not blocks:
             blocks = [text.strip()]
@@ -931,7 +940,7 @@ with tab_ai_gen:
     st.markdown("### 🧠 AI 模擬出題")
     st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」換上全新 Gmail 申請的 API Key。")
 
-# ---------- 【📥 分頁五：匯入區 (支援連字號題號極速解析)】 ----------
+# ---------- 【📥 分頁五：匯入區 (全面支援極速本地正則引擎)】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
