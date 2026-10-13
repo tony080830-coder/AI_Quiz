@@ -183,42 +183,77 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 本地正則解析引擎（完全免 API，零額度消耗）
+# 🌟 超強本地免 AI 解析引擎（容錯極高、就算沒換行也能精準切題）
 def parse_questions_locally(raw_text):
-    lines = raw_text.splitlines()
-    blocks, current_block = [], []
-    for line in lines:
-        if re.match(r'^\s*(?:\d+[\.、\s]|[Qq]\d+[\.、\s])', line):
-            if current_block:
-                blocks.append("\n".join(current_block))
-                current_block = []
-        current_block.append(line)
-    if current_block:
-        blocks.append("\n".join(current_block))
+    if not raw_text or not raw_text.strip():
+        return []
+
+    text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # 1. 偵測並抓取文末集中解答區（例如「答案：1.A 2.B 3.C」或「Key: 1-A 2-B」）
+    ans_key_map = {}
+    ans_sec = re.search(r'(?:解答|答案|參考答案|Answer Key|Key)[\s:：]*\n?([\s\S]+)$', text, re.IGNORECASE)
+    if ans_sec:
+        ans_block = ans_sec.group(1)
+        for am in re.finditer(r'(?:[\(（]?(\d+)[\)）\.\、\:\s\-]+)?([A-Ea-e])\b', ans_block):
+            q_num, a_val = am.group(1), am.group(2)
+            if q_num:
+                ans_key_map[int(q_num)] = a_val.upper()
+        # 移除解答區避免干擾題幹
+        text = text[:ans_sec.start()]
+
+    # 2. 全域切分題目（支援 1.、(1)、1)、Q1.、第1題，不依賴是否換行）
+    q_split_regex = r'(?:(?<=\n)|(?<=^)|(?<=\s))(?:\(?\d+[\.\、\)\s]|(?:Q|q)\d+[\.\、\:\s]|第\s*\d+\s*題)'
+    splits = [m.start() for m in re.finditer(q_split_regex, text)]
+    
+    blocks = []
+    if splits:
+        for i in range(len(splits)):
+            start = splits[i]
+            end = splits[i+1] if i + 1 < len(splits) else len(text)
+            blocks.append(text[start:end].strip())
+    else:
+        # 若完全無題號，退回雙換行切分
+        blocks = [b.strip() for b in text.split('\n\n') if b.strip()]
 
     parsed_questions = []
-    for b in blocks:
-        text = b.strip()
-        ans_match = re.search(r'(?:答案|正解|Ans|Key)[:：\s]*([A-Ea-e])', text, re.IGNORECASE)
-        answer = ans_match.group(1).upper() if ans_match else ""
+    for idx, b in enumerate(blocks, start=1):
+        if not b: continue
 
-        opt_matches = list(re.finditer(r'(?:[\(\（]?([A-Ea-e])[\)\）\.\、\s])\s*([^\n\(\（]+)', text))
+        # 尋找題內標註答案
+        ans_in_q = re.search(r'(?:【?\s*(?:答案|正解|Ans|Key)\s*】?[:：\s]*([A-Ea-e])|[（\(]\s*([A-Ea-e])\s*[）\)])', b, re.IGNORECASE)
+        answer = ""
+        if ans_in_q:
+            answer = (ans_in_q.group(1) or ans_in_q.group(2) or "").upper()
+        elif idx in ans_key_map:
+            answer = ans_key_map[idx]
+
+        # 尋找選項起點（匹配 (A)、A.、A、A)）
+        opt_start_match = re.search(r'(?:[\(（][A-Ea-e][\)）]|[A-Ea-e][\.\、\)])\s*', b)
+        if not opt_start_match:
+            continue
+
+        q_stem = b[:opt_start_match.start()].strip()
+        # 清除題幹開頭題號
+        q_stem = re.sub(r'^(?:\(?\d+[\.\、\)\s]|(?:Q|q)\d+[\.\、\:\s]|第\s*\d+\s*題)\s*', '', q_stem).strip()
+        # 清除題幹中的答案標記
+        q_stem = re.sub(r'【?\s*(?:答案|正解|Ans|Key)[:：\s]*[A-Ea-e]?\s*】?', '', q_stem, flags=re.IGNORECASE).strip()
+
+        # 分割選項（支援多個選項在同一行）
+        opts_part = b[opt_start_match.start():].strip()
+        raw_opts = re.split(r'(?=(?:[\(（][A-Ea-e][\)）]|[A-Ea-e][\.\、\)]))\s*', opts_part)
         options = []
-        if opt_matches:
-            for m in opt_matches:
-                options.append(f"({m.group(1).upper()}) {m.group(2).strip()}")
-            first_opt_pos = opt_matches[0].start()
-            q_text = text[:first_opt_pos].strip()
-        else:
-            q_text = text
+        for ro in raw_opts:
+            ro_clean = ro.strip()
+            if ro_clean and re.match(r'^(?:[\(（][A-Ea-e][\)）]|[A-Ea-e][\.\、\)])', ro_clean):
+                m_letter = re.search(r'[A-Ea-e]', ro_clean[:3])
+                letter = m_letter.group(0).upper() if m_letter else "A"
+                content = re.sub(r'^(?:[\(（][A-Ea-e][\)）]|[A-Ea-e][\.\、\)])\s*', '', ro_clean).strip()
+                options.append(f"({letter}) {content}")
 
-        q_text = re.sub(r'^\s*(?:\d+[\.、\s]|[Qq]\d+[\.、\s])', '', q_text).strip()
-        if ans_match:
-            q_text = re.sub(r'(?:答案|正解|Ans|Key)[:：\s]*[A-Ea-e]', '', q_text, flags=re.IGNORECASE).strip()
-
-        if q_text and len(options) >= 2:
+        if q_stem and len(options) >= 2:
             parsed_questions.append({
-                "text": q_text,
+                "text": q_stem,
                 "options": options,
                 "answer": answer if answer else "A",
                 "explanation": ""
@@ -299,7 +334,7 @@ def call_gemini_guaranteed(content, api_key, status_box=None):
             last_error = err_str
             if "429" in err_str or "quota" in err_str.lower():
                 if status_box:
-                    status_box.info(f"🔄 模型 {model_name} 額度受限，自動切換下一個備援模型...")
+                    status_box.info(f"🔄 模型 {model_name} 額度受限，自動切換備援模型...")
                 continue
             else:
                 time.sleep(1)
@@ -589,7 +624,7 @@ with tab_practice:
 
             col_prev, col_next = st.columns(2)
             with col_prev:
-                if st.button("⬅️ 上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
+                if st.button("⬅️ 看上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
                     flush_pending_updates()
                     st.session_state.exam_index -= 1
                     check_prev_id = st.session_state.exam_questions_cache[st.session_state.exam_index]['id']
@@ -796,8 +831,8 @@ with tab_review:
             else:
                 st.write(f"共找到 **{len(questions_to_show)}** 題：")
 
-                # 🌟 批次刪除選單
-                with st.expander("🧹 批次勾選刪除誤傳題目（一次刪多題）", expanded=False):
+                # 🌟 批次刪除誤傳題目
+                with st.expander("🧹 批次勾選刪除題目（一次刪多題）", expanded=False):
                     q_select_options = {f"ID {q['id']} - {q['text'][:35]}...": q['id'] for q in questions_to_show}
                     selected_q_to_delete = st.multiselect("勾選欲刪除的題目：", list(q_select_options.keys()))
                     if selected_q_to_delete:
@@ -806,7 +841,7 @@ with tab_review:
                             placeholders = ','.join(['?'] * len(delete_ids))
                             c.execute(f"DELETE FROM questions WHERE id IN ({placeholders})", tuple(delete_ids))
                             conn.commit()
-                            st.success(f"✅ 成功刪除 {len(delete_ids)} 道誤傳題目！")
+                            st.success(f"✅ 成功刪除 {len(delete_ids)} 道題目！")
                             time.sleep(1)
                             st.rerun()
 
@@ -825,7 +860,7 @@ with tab_review:
                         
                         col_edt, col_del_single = st.columns([3, 1])
                         with col_del_single:
-                            # 🌟 單題刪除按鈕
+                            # 🌟 單題直接刪除
                             if st.button("🗑️ 刪除此題", key=f"del_single_q_{q['id']}", use_container_width=True):
                                 c.execute("DELETE FROM questions WHERE id=?", (q['id'],))
                                 conn.commit()
@@ -855,7 +890,7 @@ with tab_ai_gen:
     st.markdown("### 🧠 AI 模擬出題")
     st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」換上全新 Gmail 申請的 API Key。")
 
-# ---------- 【📥 分頁五：匯入區 (免 AI + 分批 AI 雙引擎)】 ----------
+# ---------- 【📥 分頁五：匯入區 (全面支援極速本地正則引擎)】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
@@ -894,7 +929,7 @@ with tab_import:
                     st.error("⚠️ 無法讀取文字，請確認檔案不是純掃描圖片。")
                 else:
                     if engine_type.startswith("⚡ 本地"):
-                        with st.spinner("正在執行本地正則極速分析..."):
+                        with st.spinner("正在執行本地正則極速分析切題..."):
                             questions = parse_questions_locally(full_text)
                             if questions:
                                 for nq in questions:
@@ -903,11 +938,11 @@ with tab_import:
                                     c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
                                               (target_folder, final_name, nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], ""))
                                 conn.commit()
-                                st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！（完全不耗 API）")
+                                st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！（完全不耗 API 額度）")
                                 time.sleep(1)
                                 st.rerun()
                             else:
-                                st.warning("⚠️ 本地規則未能切分出選項，請嘗試切換至「🤖 AI 智慧解析」或使用純文字貼上。")
+                                st.warning("⚠️ 本地規則未能切分出選項，請確認文字內是否有題號與選項，或切換至「純文字直接貼上」微調。")
                     else:
                         api_key = get_api_key()
                         if not api_key:
@@ -940,7 +975,7 @@ with tab_import:
                             c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
                                       (target_folder, paste_category_name.strip(), nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], ""))
                         conn.commit()
-                        st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！")
+                        st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！")
                         time.sleep(1)
                         st.rerun()
                     else: st.warning("⚠️ 未能辨識題目格式，請確認是否包含題號與 (A)(B)(C)(D) 選項。")
@@ -1005,7 +1040,7 @@ with tab_settings:
 
         st.divider()
 
-        # 🌟 完整功能回歸：📦 批次管理考卷
+        # 🌟 完整保留：📦 批次管理考卷
         st.subheader("📦 批次管理考卷 (多選移動 / 刪除)")
         try:
             c.execute("SELECT folder, category FROM questions GROUP BY folder, category")
@@ -1056,7 +1091,7 @@ with tab_settings:
 
         st.divider()
 
-        # 🌟 完整功能回歸：📄 單一考卷詳細管理
+        # 🌟 完整保留：📄 單一考卷詳細管理
         st.subheader("📄 單一考卷詳細管理 (更名 / 星號 / 移動 / 刪除)")
         st.caption("💡 直接修改路徑即可自由建立上下層資料夾，例如在前面加上 `大三/` 就能包進母資料夾。")
         try:
@@ -1084,7 +1119,7 @@ with tab_settings:
 
         st.divider()
 
-        # 🌟 完整功能回歸：🗂️ 整個資料夾階層更名與移動
+        # 🌟 完整保留：🗂️ 整個資料夾階層更名與移動
         st.subheader("🗂️ 整個資料夾階層更名與移動")
         st.caption("💡 想要把整個 `生化` 移進 `大三` 變成 `大三/生化`？直接在下方修改完整路徑即可，所有子資料夾會自動跟隨！")
         try:
