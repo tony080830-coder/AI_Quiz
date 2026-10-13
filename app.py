@@ -183,7 +183,7 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 本地免 AI 正則解析引擎（完全不耗 API 額度）
+# 🌟 本地正則解析引擎（完全免 API，零額度消耗）
 def parse_questions_locally(raw_text):
     lines = raw_text.splitlines()
     blocks, current_block = [], []
@@ -226,41 +226,34 @@ def parse_questions_locally(raw_text):
 
     return parsed_questions
 
-# 🌟 防彈 JSON 解析器
 def extract_json_questions(raw_text):
     raw = raw_text.strip()
     try:
         data = json.loads(raw)
         return [data] if isinstance(data, dict) else data
-    except:
-        pass
+    except: pass
     
     match_arr = re.search(r'\[\s*\{.*\}\s*\]', raw, re.DOTALL)
     if match_arr:
-        try:
-            return json.loads(match_arr.group(0))
-        except:
-            pass
+        try: return json.loads(match_arr.group(0))
+        except: pass
             
     match_obj = re.search(r'\{.*\}', raw, re.DOTALL)
     if match_obj:
         try:
             data = json.loads(match_obj.group(0))
             return [data] if isinstance(data, dict) else data
-        except:
-            pass
+        except: pass
 
     clean = re.sub(r'```(?:json)?', '', raw)
     clean = re.sub(r'```', '', clean).strip()
     try:
         data = json.loads(clean)
         return [data] if isinstance(data, dict) else data
-    except:
-        pass
+    except: pass
         
     return []
 
-# 🌟 動態模型清單探測
 def get_valid_model_list(api_key):
     clean_key = api_key.strip()
     genai.configure(api_key=clean_key)
@@ -271,13 +264,13 @@ def get_valid_model_list(api_key):
                 model_pure_name = m.name.replace('models/', '')
                 supported_models.append(model_pure_name)
     except Exception as e:
-        return [], f"API 連線驗證失敗：{str(e)}"
+        return [], f"API 連線失敗：{str(e)}"
     
     if not supported_models:
         return [], "您的 API Key 無法存取任何生成模型，請確認是否為有效金鑰。"
         
     ordered_models = []
-    preferred = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-pro']
+    preferred = ['gemini-2.0-flash', 'gemini-1.5-flash-8b', 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
     for p in preferred:
         if p in supported_models and p not in ordered_models:
             ordered_models.append(p)
@@ -287,7 +280,6 @@ def get_valid_model_list(api_key):
             
     return ordered_models, None
 
-# 🌟 保證成功匯入：自動探測模型、429 熔斷防卡死機制
 def call_gemini_guaranteed(content, api_key, status_box=None):
     clean_key = api_key.strip()
     candidate_models, err = get_valid_model_list(clean_key)
@@ -295,30 +287,24 @@ def call_gemini_guaranteed(content, api_key, status_box=None):
         return [], err
 
     last_error = ""
-    for attempt in range(len(candidate_models)):
-        model_name = candidate_models[attempt]
+    for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
             resp = model.generate_content(content, request_options={"timeout": 90})
             if resp and resp.text:
                 res = extract_json_questions(resp.text.strip())
-                if res:
-                    return res, None
+                if res: return res, None
         except Exception as e:
             err_str = str(e)
             last_error = err_str
             if "429" in err_str or "quota" in err_str.lower():
-                delay_match = re.search(r'seconds:\s*(\d+)', err_str)
-                wait_sec = int(delay_match.group(1)) + 2 if delay_match else 30
-                if wait_sec > 60:
-                    return [], f"🚨 該 Google 帳號今日免費額度已耗盡。建議使用下方「⚡ 本地免 AI 解析」秒級匯入，或換另一組全新 Gmail 帳號的 API Key！"
                 if status_box:
-                    status_box.warning(f"⏳ 頻率保護中：剩餘 {wait_sec} 秒後重試...")
-                time.sleep(wait_sec)
+                    status_box.info(f"🔄 模型 {model_name} 額度受限，自動切換下一個備援模型...")
+                continue
             else:
-                time.sleep(2)
+                time.sleep(1)
 
-    return [], f"呼叫失敗（{last_error}）"
+    return [], f"此帳號所有可用模型今日額度均已滿，錯誤：{last_error}"
 
 def call_gemini_text_fallback(prompt, api_key):
     clean_key = api_key.strip()
@@ -328,13 +314,10 @@ def call_gemini_text_fallback(prompt, api_key):
         try:
             m = genai.GenerativeModel(m_name)
             resp = m.generate_content(prompt, request_options={"timeout": 60})
-            if resp and resp.text:
-                return resp.text.strip()
-        except:
-            continue
+            if resp and resp.text: return resp.text.strip()
+        except: continue
     return None
 
-# 🌟 雙語切換處理引擎
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -357,7 +340,6 @@ def get_question_bilingual(q, target_lang="en"):
         prompt = f'請將以下題目翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n以標準 JSON 格式輸出：\n{{"text": "...", "options": [...]}}'
         parsed_list, _ = call_gemini_guaranteed(prompt, api_key)
         parsed = parsed_list[0] if parsed_list else {}
-        
         trans_text = parsed.get('text', orig_text)
         trans_opts = parsed.get('options', orig_opts)
         c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, json.dumps(trans_opts, ensure_ascii=False), q['id']))
@@ -378,8 +360,7 @@ def extract_text_from_docx(file_bytes):
                     texts = [child.text for child in node.iter() if child.tag.endswith('t') and child.text]
                     if texts: paragraphs.append("".join(texts))
             return "\n".join(paragraphs)
-    except Exception as e:
-        return f"[Word 提取錯誤: {e}]"
+    except Exception as e: return f"[Word 提取錯誤: {e}]"
 
 def extract_text_from_pptx(file_bytes):
     try:
@@ -401,8 +382,7 @@ def extract_text_from_pptx(file_bytes):
                 if slide_paragraphs:
                     slides_text.append(f"--- Slide {idx} ---\n" + "\n".join(slide_paragraphs))
             return "\n\n".join(slides_text)
-    except Exception as e:
-        return f"[PPT 提取錯誤: {e}]"
+    except Exception as e: return f"[PPT 提取錯誤: {e}]"
 
 # ================= 1. 測驗與練習狀態管理 =================
 if 'exam_active' not in st.session_state: st.session_state.exam_active = False
@@ -534,7 +514,6 @@ with tab_practice:
                 st.rerun()
 
         st.divider()
-
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
@@ -590,15 +569,14 @@ with tab_practice:
                                 conn.commit()
                                 curr_q['explanation'] = ai_res
                                 st.rerun()
-                            else:
-                                st.error("生成失敗，API 今日額度可能已達上限。")
+                            else: st.error("生成失敗，API 額度可能已滿。")
 
             c.execute("SELECT explanation_image FROM questions WHERE id=?", (curr_q_id,))
             img_row = c.fetchone()
             curr_img = img_row['explanation_image'] if img_row else ""
             if curr_img: st.image(curr_img, use_container_width=True)
 
-            with st.expander("✏️ 編輯本題解析 / 上傳筆記截圖 (極速秒存)"):
+            with st.expander("✏️ 編輯本題解析 / 上傳筆記截圖"):
                 rev_exp_input = st.text_area("文字解析：", value=curr_q.get('explanation', ''), key=f"p_rev_txt_{curr_q_id}")
                 rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"p_rev_img_{curr_q_id}")
                 if st.button("💾 儲存筆記", key=f"p_save_note_{curr_q_id}", type="primary"):
@@ -611,7 +589,7 @@ with tab_practice:
 
             col_prev, col_next = st.columns(2)
             with col_prev:
-                if st.button("⬅️ 看上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
+                if st.button("⬅️ 上一題", disabled=(idx == 0), use_container_width=True, key="p_prev"):
                     flush_pending_updates()
                     st.session_state.exam_index -= 1
                     check_prev_id = st.session_state.exam_questions_cache[st.session_state.exam_index]['id']
@@ -634,8 +612,7 @@ with tab_test:
     elif not st.session_state.exam_active and not st.session_state.exam_finished:
         st.markdown("### 📝 模擬測驗模式（全卷作答，最後統一給分結算）")
         folders = get_all_folders()
-        if not folders: 
-            st.warning("請先匯入考卷！")
+        if not folders: st.warning("請先匯入考卷！")
         else:
             col_f, col_st = st.columns([2, 1])
             with col_f: selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="t_fold")
@@ -787,12 +764,12 @@ with tab_test:
             st.session_state.exam_questions_cache, st.session_state.exam_user_answers = [], {}
             st.rerun()
 
-# ---------- 【📖 分頁三：錯題總覽區】 ----------
+# ---------- 【📖 分頁三：錯題總覽區 (支援單題與批次刪除)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 系統運作中，背景查詢已自動暫停。")
     else:
-        st.markdown("### 📖 各考卷 / 講義題目與解析總覽")
+        st.markdown("### 📖 各考卷題目總覽與管理")
         folders = get_all_folders()
         if not folders: 
             st.info("目前沒有題庫資料。")
@@ -818,38 +795,79 @@ with tab_review:
             if not questions_to_show: st.warning("此分類下沒有找到題目。")
             else:
                 st.write(f"共找到 **{len(questions_to_show)}** 題：")
+
+                # 🌟 批次刪除選單
+                with st.expander("🧹 批次勾選刪除誤傳題目（一次刪多題）", expanded=False):
+                    q_select_options = {f"ID {q['id']} - {q['text'][:35]}...": q['id'] for q in questions_to_show}
+                    selected_q_to_delete = st.multiselect("勾選欲刪除的題目：", list(q_select_options.keys()))
+                    if selected_q_to_delete:
+                        if st.button("🚨 確認刪除選中的題目", type="primary", use_container_width=True):
+                            delete_ids = [q_select_options[k] for k in selected_q_to_delete]
+                            placeholders = ','.join(['?'] * len(delete_ids))
+                            c.execute(f"DELETE FROM questions WHERE id IN ({placeholders})", tuple(delete_ids))
+                            conn.commit()
+                            st.success(f"✅ 成功刪除 {len(delete_ids)} 道誤傳題目！")
+                            time.sleep(1)
+                            st.rerun()
+
                 st.divider()
                 for idx, q in enumerate(questions_to_show):
                     is_st = bool(q.get('is_starred', 0))
                     q_opts = get_question_options(q)
-                    with st.expander(f"{'⭐ ' if is_st else ''}題目 {idx+1}: {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
+                    with st.expander(f"{'⭐ ' if is_st else ''}第 {idx+1} 題 (ID: {q['id']}): {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                         st.markdown(f"**【題目】** {q['text']}")
                         for opt_i, opt_text in enumerate(q_opts):
                             st.markdown(f"- ({chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)}) {opt_text}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                         exp_text = q.get('explanation', '') if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
                         st.markdown(f"💡 **解析**：{exp_text}")
+                        if q.get('explanation_image'): st.image(q['explanation_image'], use_container_width=True)
+                        
+                        col_edt, col_del_single = st.columns([3, 1])
+                        with col_del_single:
+                            # 🌟 單題刪除按鈕
+                            if st.button("🗑️ 刪除此題", key=f"del_single_q_{q['id']}", use_container_width=True):
+                                c.execute("DELETE FROM questions WHERE id=?", (q['id'],))
+                                conn.commit()
+                                st.toast(f"✅ 已刪除題目 ID: {q['id']}")
+                                time.sleep(0.5)
+                                st.rerun()
+
+                        with st.expander("✏️ 編輯詳解 / 更換筆記截圖"):
+                            rev_exp_input = st.text_area("修改文字解析：", value=q['explanation'] if q.get('explanation') and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
+                            rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
+                            col_sv_b, col_rm_img = st.columns(2)
+                            with col_sv_b:
+                                if st.button("💾 儲存修改", key=f"rev_save_btn_{q['id']}", use_container_width=True):
+                                    new_img_b64 = q.get('explanation_image', '')
+                                    if rev_img_input: new_img_b64 = compress_image_to_base64(rev_img_input)
+                                    c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, q['id']))
+                                    conn.commit()
+                                    st.toast("✅ 詳解已極速更新！"); st.rerun()
+                            with col_rm_img:
+                                if st.button("🗑️ 清除截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
+                                    c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
+                                    conn.commit()
+                                    st.toast("✅ 筆記截圖已移除！"); st.rerun()
 
 # ---------- 【🧠 分頁四：AI 仿題出題區】 ----------
 with tab_ai_gen:
     st.markdown("### 🧠 AI 模擬出題")
-    st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」分頁換上全新 Gmail 帳號的 API Key。")
+    st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」換上全新 Gmail 申請的 API Key。")
 
-# ---------- 【📥 分頁五：匯入區 (支援免 AI 本地解析)】 ----------
+# ---------- 【📥 分頁五：匯入區 (免 AI + 分批 AI 雙引擎)】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
     else:
         st.markdown("### 📥 題庫匯入區")
-        
         existing_folders = get_all_folders()
         folder_choice = st.selectbox("📂 目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
         target_folder = st.text_input("輸入新資料夾名稱：", "大三/生化") if folder_choice == "-- ➕ 新增資料夾 --" else folder_choice
 
-        # 🌟 匯入核心：提供「免 AI 本地規則解析」徹底解決 429 配額卡死
         engine_type = st.radio(
             "⚙️ 選擇匯入引擎：",
-            ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，不怕被鎖）", "🤖 AI 智慧解析（排版極度凌亂時使用，需 API 額度）"]
+            ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，永遠不怕被鎖）", "🤖 AI 智慧解析（排版極混亂時使用，需 API 額度）"]
         )
 
         import_mode = st.radio("資料來源：", ["📁 檔案上傳 (PDF, Word, PPT)", "📋 純文字直接貼上"])
@@ -863,18 +881,14 @@ with tab_import:
                 file_bytes = uploaded_file.getvalue()
                 fname = uploaded_file.name.lower()
 
-                # 提取全文
                 full_text = ""
                 if fname.endswith('.pdf'):
                     if HAS_PYPDF:
                         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
                         full_text = "\n".join([(page.extract_text() or "") for page in reader.pages])
-                elif fname.endswith('.docx'):
-                    full_text = extract_text_from_docx(file_bytes)
-                elif fname.endswith('.pptx'):
-                    full_text = extract_text_from_pptx(file_bytes)
-                else:
-                    full_text = file_bytes.decode('utf-8', errors='ignore')
+                elif fname.endswith('.docx'): full_text = extract_text_from_docx(file_bytes)
+                elif fname.endswith('.pptx'): full_text = extract_text_from_pptx(file_bytes)
+                else: full_text = file_bytes.decode('utf-8', errors='ignore')
 
                 if not full_text.strip():
                     st.error("⚠️ 無法讀取文字，請確認檔案不是純掃描圖片。")
@@ -889,11 +903,11 @@ with tab_import:
                                     c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
                                               (target_folder, final_name, nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], ""))
                                 conn.commit()
-                                st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！（耗費 0 API 額度）")
+                                st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！（完全不耗 API）")
                                 time.sleep(1)
                                 st.rerun()
                             else:
-                                st.warning("⚠️ 本地規則未能切分出選項，請嘗試切換至「🤖 AI 智慧解析」或使用純文字貼上調整。")
+                                st.warning("⚠️ 本地規則未能切分出選項，請嘗試切換至「🤖 AI 智慧解析」或使用純文字貼上。")
                     else:
                         api_key = get_api_key()
                         if not api_key:
@@ -912,8 +926,7 @@ with tab_import:
                                     st.success(f"🎉 AI 成功存入 {len(questions)} 題！")
                                     time.sleep(1)
                                     st.rerun()
-                                else:
-                                    st.error(err_msg)
+                                else: st.error(err_msg)
         else:
             paste_category_name = st.text_input("📄 考卷/講義名稱：", value="未命名考卷")
             ptext = st.text_area("請在此貼上題目文字：", height=250)
@@ -930,12 +943,10 @@ with tab_import:
                         st.success(f"🎉 本地免 AI 引擎成功存入 {len(questions)} 題！")
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.warning("⚠️ 未能辨識題目格式，請確認是否包含題號與 (A)(B)(C)(D) 選項。")
+                    else: st.warning("⚠️ 未能辨識題目格式，請確認是否包含題號與 (A)(B)(C)(D) 選項。")
                 else:
                     api_key = get_api_key()
-                    if not api_key:
-                        st.error("請先前往「⚙️ 設定」輸入 Gemini API Key！")
+                    if not api_key: st.error("請先前往「⚙️ 設定」輸入 Gemini API Key！")
                     else:
                         parse_prompt = "請從文本中提取所有選擇題，嚴格輸出 JSON 陣列：[{\"text\":\"...\",\"options\":[\"(A)...\",\"(B)...\"],\"answer\":\"A\",\"explanation\":\"\"}]"
                         with st.spinner("AI 解析中..."):
@@ -950,43 +961,153 @@ with tab_import:
                                 st.success(f"🎉 AI 成功存入 {len(questions)} 題！")
                                 time.sleep(1)
                                 st.rerun()
-                            else:
-                                st.error(err_msg)
+                            else: st.error(err_msg)
 
-# ---------- 【⚙️ 分頁六：設定與管理區】 ----------
+# ---------- 【⚙️ 分頁六：設定與資料夾完整管理區】 ----------
 with tab_settings:
-    st.subheader("🔑 API Key 狀態與設定")
-    current_saved_key = get_api_key()
-    if current_saved_key:
-        st.info(f"當前儲存的 API Key 結尾為：`...{current_saved_key[-4:]}`")
+    if st.session_state.exam_active or st.session_state.exam_finished:
+        st.info("⚡ 刷題進行中，此面板已自動休眠。")
     else:
-        st.warning("⚠️ 目前尚未設定 API Key")
+        st.subheader("🔑 API Key 狀態與設定")
+        current_saved_key = get_api_key()
+        if current_saved_key:
+            st.info(f"當前生效中的 API Key 後四碼為：`...{current_saved_key[-4:]}`")
+        else:
+            st.warning("⚠️ 目前尚未設定 API Key")
 
-    col_k1, col_k2 = st.columns([3, 1])
-    with col_k1:
-        new_key = st.text_input("輸入 Gemini API Key", value="", type="password", placeholder="貼上全新 Gmail 申請的 API Key")
-    with col_k2:
-        st.write("")
-        st.write("")
-        if st.button("💾 儲存 Key", type="primary", use_container_width=True):
-            clean_k = new_key.strip()
-            if clean_k:
-                c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (clean_k,))
-                conn.commit()
-                st.success("✅ 已儲存至雲端資料庫！")
-                time.sleep(1)
-                st.rerun()
+        col_k1, col_k2 = st.columns([3, 1])
+        with col_k1:
+            new_key = st.text_input("輸入 Gemini API Key", value="", type="password", placeholder="貼上全新 Gmail 申請的 API Key")
+        with col_k2:
+            st.write("")
+            st.write("")
+            if st.button("💾 儲存 Key", type="primary", use_container_width=True):
+                clean_k = new_key.strip()
+                if clean_k:
+                    c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (clean_k,))
+                    conn.commit()
+                    st.success("✅ 已儲存至雲端資料庫！")
+                    time.sleep(1)
+                    st.rerun()
 
-    # 🌟 體檢功能：直接測試當前 Key 的剩餘狀態
-    if current_saved_key and st.button("🧪 測試當前 API Key 能否正常通訊", use_container_width=True):
-        with st.spinner("連線 Google 測試中..."):
-            valid_models, test_err = get_valid_model_list(current_saved_key)
-            if not valid_models:
-                st.error(f"❌ 驗證失敗：{test_err}")
-            else:
-                try:
-                    m = genai.GenerativeModel(valid_models[0])
-                    res = m.generate_content("Ping")
-                    st.success(f"✅ 連線成功！此 Key 完全正常，首選模型：`{valid_models[0]}`")
-                except Exception as e:
-                    st.error(f"❌ 呼叫受限（此 Google 帳號今日額度可能已滿）：{e}")
+        if current_saved_key and st.button("🧪 測試當前 API Key 能否正常通訊", use_container_width=True):
+            with st.spinner("連線 Google 測試中..."):
+                valid_models, test_err = get_valid_model_list(current_saved_key)
+                if not valid_models:
+                    st.error(f"❌ 驗證失敗：{test_err}")
+                else:
+                    try:
+                        m = genai.GenerativeModel(valid_models[0])
+                        res = m.generate_content("Ping")
+                        st.success(f"✅ 連線成功！此 Key 完全正常，首選模型：`{valid_models[0]}`")
+                    except Exception as e:
+                        st.error(f"❌ 呼叫受限（此 Google 帳號今日額度可能已滿）：{e}")
+
+        st.divider()
+
+        # 🌟 完整功能回歸：📦 批次管理考卷
+        st.subheader("📦 批次管理考卷 (多選移動 / 刪除)")
+        try:
+            c.execute("SELECT folder, category FROM questions GROUP BY folder, category")
+            all_items = c.fetchall()
+            all_folders = get_all_folders()
+            
+            item_options = [f"📂 {r['folder']} ＞ 📄 {r['category']}" for r in all_items]
+            selected_batch = st.multiselect("✅ 勾選你要處理的考卷 (支援多選)：", item_options)
+            
+            if selected_batch:
+                st.info(f"已選取 {len(selected_batch)} 份考卷，請選擇下方動作：")
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    batch_target = st.selectbox("🎯 批次移動至資料夾：", ["-- 手動輸入全新路徑 (自由建立上下層) --"] + all_folders, key="batch_move_sel")
+                    batch_final_folder = batch_target
+                    if batch_target == "-- 手動輸入全新路徑 (自由建立上下層) --":
+                        batch_final_folder = st.text_input("✏️ 輸入全新路徑 (用 / 分隔，例如：大三/生化/期中)：", key="batch_move_txt")
+                    
+                    if st.button("🚀 執行批次移動", type="primary", use_container_width=True):
+                        if batch_final_folder.strip():
+                            clean_dst = batch_final_folder.strip().replace('//', '/')
+                            for sel in selected_batch:
+                                f_part, c_part = sel.split(" ＞ 📄 ")
+                                orig_f = f_part.replace("📂 ", "")
+                                orig_c = c_part
+                                c.execute("UPDATE questions SET folder=? WHERE folder=? AND category=?", (clean_dst, orig_f, orig_c))
+                            conn.commit()
+                            st.success(f"✅ 成功將 {len(selected_batch)} 份考卷移動至「{clean_dst}」！")
+                            time.sleep(1)
+                            st.rerun()
+                        else: st.error("請輸入目標資料夾名稱！")
+                            
+                with col_b2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🗑️ 批次刪除選取的考卷", use_container_width=True):
+                        for sel in selected_batch:
+                            f_part, c_part = sel.split(" ＞ 📄 ")
+                            orig_f = f_part.replace("📂 ", "")
+                            orig_c = c_part
+                            c.execute("DELETE FROM questions WHERE folder=? AND category=?", (orig_f, orig_c))
+                            c.execute("DELETE FROM exam_history WHERE category=?", (orig_c,))
+                        conn.commit()
+                        st.success(f"✅ 成功刪除 {len(selected_batch)} 份考卷！")
+                        time.sleep(1)
+                        st.rerun()
+        except Exception as e: pass
+
+        st.divider()
+
+        # 🌟 完整功能回歸：📄 單一考卷詳細管理
+        st.subheader("📄 單一考卷詳細管理 (更名 / 星號 / 移動 / 刪除)")
+        st.caption("💡 直接修改路徑即可自由建立上下層資料夾，例如在前面加上 `大三/` 就能包進母資料夾。")
+        try:
+            c.execute("SELECT folder, category, MAX(pdf_starred) as pdf_starred FROM questions GROUP BY folder, category")
+            items = c.fetchall()
+            for index, row in enumerate(items):
+                f_name, p_name = row['folder'], row['category']
+                with st.expander(f"{'⭐ ' if bool(row['pdf_starred']) else ''}📂 {f_name} ＞ 📄 {p_name}"):
+                    new_p_name = st.text_input("📄 考卷名稱", value=p_name, key=f"p_rename_{index}")
+                    new_f_name = st.text_input("📂 所屬資料夾 (用 / 分隔建立多層級)", value=f_name, key=f"p_folder_{index}")
+
+                    col_save, col_star_pdf, col_del = st.columns(3)
+                    if col_save.button("💾 儲存變更", key=f"save_{index}", use_container_width=True):
+                        clean_folder = new_f_name.strip().replace('//', '/')
+                        c.execute("UPDATE questions SET category=?, folder=? WHERE folder=? AND category=?", (new_p_name.strip(), clean_folder, f_name, p_name))
+                        c.execute("UPDATE exam_history SET category=? WHERE category=?", (new_p_name.strip(), p_name))
+                        conn.commit(); st.rerun()
+                    if col_star_pdf.button("⭐ 標記星號" if not bool(row['pdf_starred']) else "☆ 取消星號", key=f"star_pdf_{index}", use_container_width=True):
+                        c.execute("UPDATE questions SET pdf_starred=? WHERE folder=? AND category=?", (0 if bool(row['pdf_starred']) else 1, f_name, p_name))
+                        conn.commit(); st.rerun()
+                    if col_del.button("🗑️ 刪除此卷", key=f"del_{index}", use_container_width=True):
+                        c.execute("DELETE FROM questions WHERE folder=? AND category=?", (f_name, p_name))
+                        conn.commit(); st.rerun()
+        except: pass
+
+        st.divider()
+
+        # 🌟 完整功能回歸：🗂️ 整個資料夾階層更名與移動
+        st.subheader("🗂️ 整個資料夾階層更名與移動")
+        st.caption("💡 想要把整個 `生化` 移進 `大三` 變成 `大三/生化`？直接在下方修改完整路徑即可，所有子資料夾會自動跟隨！")
+        try:
+            all_folders_rename = get_all_folders()
+            if all_folders_rename:
+                old_folder_name = st.selectbox("📦 選擇要修改的資料夾：", all_folders_rename, key="rename_folder_select")
+                new_folder_name = st.text_input("✏️ 編輯完整路徑 (隨意增減上下層次)：", value=old_folder_name, key="rename_folder_input")
+                if st.button("🚀 執行結構修改", use_container_width=True):
+                    if new_folder_name.strip() and new_folder_name.strip() != old_folder_name:
+                        new_path_clean = new_folder_name.strip().replace('//', '/')
+                        c.execute("SELECT DISTINCT folder FROM questions WHERE folder = ? OR folder LIKE ?", (old_folder_name, f"{old_folder_name}/%"))
+                        folders_to_update = [row[0] for row in c.fetchall()]
+                        for f in folders_to_update:
+                            if f == old_folder_name:
+                                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path_clean, f))
+                            else:
+                                sub_path = f[len(old_folder_name):] 
+                                c.execute("UPDATE questions SET folder=? WHERE folder=?", (new_path_clean + sub_path, f))
+                        conn.commit()
+                        st.success(f"✅ 整個資料夾結構已成功更新為「{new_path_clean}」！")
+                        time.sleep(1)
+                        st.rerun()
+                    elif new_folder_name.strip() == old_folder_name:
+                        st.warning("路徑沒有變更喔！")
+                    else: st.warning("請輸入新路徑！")
+        except: pass
