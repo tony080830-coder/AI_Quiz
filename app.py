@@ -10,7 +10,6 @@ import zipfile
 import xml.etree.ElementTree as ET
 from PIL import Image
 import google.generativeai as genai
-import concurrent.futures
 
 try:
     import pypdf
@@ -180,7 +179,7 @@ def get_question_options(q):
     return opts if opts else ["A", "B"]
 
 def is_primarily_english(text):
-    zh_chars = len(re.findall(r'[一-鿿]', text))
+    zh_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
@@ -217,7 +216,7 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 雙語切換處理引擎
+# 🌟 雙語切換處理引擎 (使用 gemini-3.6-flash)
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -237,10 +236,10 @@ def get_question_bilingual(q, target_lang="en"):
 
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3.5-flash')
+        model = genai.GenerativeModel('gemini-3.6-flash')
         lang_target_desc = "專業醫學英文 (USMLE English)" if target_lang == "en" else "繁體中文（台灣醫學常用術語）"
         prompt = f'請將以下醫學/生化選擇題翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n【規範】以標準 JSON 格式輸出：\n{{"text": "翻譯後的題目", "options": ["選項1", "選項2", ...]}}'
-        resp = model.generate_content(prompt, request_options={"timeout": 45})
+        resp = model.generate_content(prompt, request_options={"timeout": 60})
         raw = resp.text.strip()
         parsed_list = extract_json_questions(raw)
         parsed = parsed_list[0] if parsed_list else {}
@@ -483,7 +482,7 @@ with tab_practice:
                         with st.spinner("撰寫中..."):
                             try:
                                 genai.configure(api_key=api_key)
-                                resp = genai.GenerativeModel('gemini-3.5-flash').generate_content(f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。", request_options={"timeout": 60})
+                                resp = genai.GenerativeModel('gemini-3.6-flash').generate_content(f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。", request_options={"timeout": 60})
                                 c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text.strip(), curr_q_id))
                                 conn.commit()
                                 curr_q['explanation'] = resp.text.strip()
@@ -851,7 +850,7 @@ with tab_ai_gen:
                             try:
                                 genai.configure(api_key=api_key)
                                 ai_prompt = f"Analyze these questions from '{gen_target_pdf}':\n{sample_context}\n\nTASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\nRULES:\n1. Options in English (4 or 5 choices).\n2. Provide best answer.\n3. Explanation in Traditional Chinese.\n4. Output JSON array only:\n" + '[{"text": "...", "options": ["A. ...", "B. ..."], "answer": "A", "explanation": "..."}]'
-                                resp = genai.GenerativeModel('gemini-3.5-flash').generate_content(ai_prompt, request_options={"timeout": 120})
+                                resp = genai.GenerativeModel('gemini-3.6-flash').generate_content(ai_prompt, request_options={"timeout": 120})
                                 raw = resp.text.strip()
                                 parsed_list = extract_json_questions(raw)
                                 st.session_state.ai_generated_temp = parsed_list
@@ -950,45 +949,42 @@ with tab_import:
                     total_imported = 0
                     errors_encountered = []
                     
-                    def process_file_chunk(b_content):
-                        genai.configure(api_key=api_key)
-                        model_thread = genai.GenerativeModel('gemini-3.5-flash')
-                        last_err = ""
-                        for attempt in range(3):
+                    model_seq = genai.GenerativeModel('gemini-3.6-flash')
+                    
+                    for b_idx, b_info in enumerate(batches):
+                        status_box.markdown(f"⏳ 處理 {b_info['title']} [{b_idx+1}/{len(batches)}] ...")
+                        
+                        for attempt in range(4):
                             try:
-                                resp = model_thread.generate_content(b_content, request_options={"timeout": 120})
+                                resp = model_seq.generate_content(b_info['content'], request_options={"timeout": 120})
                                 raw = resp.text.strip()
-                                return extract_json_questions(raw), None
+                                chunk_questions = extract_json_questions(raw)
+
+                                if chunk_questions:
+                                    for nq in chunk_questions:
+                                        opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
+                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                                    conn.commit()
+                                    total_imported += len(chunk_questions)
+                                    time.sleep(12) # 5 RPM 安全防護，每次間隔 12 秒
+                                    break
                             except Exception as e: 
-                                last_err = str(e)
-                                time.sleep(5)
-                        return None, last_err
-
-                    status_box.markdown(f"🚀 啟動多執行緒引擎，平行處理 {len(batches)} 個區塊...")
-
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                        futures = {executor.submit(process_file_chunk, b['content']): b for b in batches}
-                        completed = 0
-                        for future in concurrent.futures.as_completed(futures):
-                            chunk_questions, err_msg = future.result()
-                            if err_msg:
-                                errors_encountered.append(err_msg)
-                            elif chunk_questions:
-                                for nq in chunk_questions:
-                                    opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
-                                    opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                conn.commit()
-                                total_imported += len(chunk_questions)
-                            
-                            completed += 1
-                            prog_bar.progress(completed / len(batches))
-                            status_box.markdown(f"⏳ 平行解析進度 [{completed}/{len(batches)}] ...")
-                            
+                                err_str = str(e)
+                                if "429" in err_str or "quota" in err_str.lower():
+                                    status_box.markdown("⚠️ 觸發頻率限制 (429)，自動休眠 14 秒後重新嘗試...")
+                                    time.sleep(14)
+                                else:
+                                    time.sleep(4)
+                                if attempt == 3:
+                                    errors_encountered.append(err_str)
+                                    
+                        prog_bar.progress((b_idx + 1) / len(batches))
+                        
                     status_box.empty()
                     prog_bar.empty()
                     if total_imported > 0:
-                        st.success(f"🎉 成功存入 {total_imported} 題！")
+                        st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
                         time.sleep(1)
                         st.rerun()
                     else:
@@ -1015,41 +1011,40 @@ with tab_import:
                     total_imported = 0
                     errors_encountered = []
                     
-                    def process_text_chunk(batch_text):
-                        genai.configure(api_key=api_key)
-                        model_thread = genai.GenerativeModel('gemini-3.5-flash')
-                        last_err = ""
-                        for attempt in range(3):
-                            try:
-                                resp = model_thread.generate_content([parse_prompt, batch_text], request_options={"timeout": 120})
-                                raw = resp.text.strip()
-                                return extract_json_questions(raw), None
-                            except Exception as e: 
-                                last_err = str(e)
-                                time.sleep(5)
-                        return None, last_err
+                    genai.configure(api_key=api_key)
+                    model_seq = genai.GenerativeModel('gemini-3.6-flash')
+                    
+                    for b_idx, batch_text in enumerate(text_batches):
+                        status_box.markdown(f"⏳ 正在分析純文字區塊 [{b_idx+1}/{len(text_batches)}] ...")
+                        if not batch_text.strip(): continue
                         
-                    status_box.markdown(f"🚀 啟動防呆解析引擎，處理 {len(text_batches)} 個區塊...")
-
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                        futures = {executor.submit(process_text_chunk, bt): bt for bt in text_batches}
-                        completed = 0
-                        for future in concurrent.futures.as_completed(futures):
-                            new_questions, err_msg = future.result()
-                            if err_msg:
-                                errors_encountered.append(err_msg)
-                            elif new_questions:
-                                for nq in new_questions:
-                                    raw_opts = nq.get('options', [])
-                                    opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
-                                    opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                conn.commit()
-                                total_imported += len(new_questions)
+                        for attempt in range(4):
+                            try:
+                                resp = model_seq.generate_content([parse_prompt, batch_text], request_options={"timeout": 120})
+                                raw = resp.text.strip()
+                                new_questions = extract_json_questions(raw)
                                 
-                            completed += 1
-                            prog_bar.progress(completed / len(text_batches))
-                            status_box.markdown(f"⏳ 平行解析進度 [{completed}/{len(text_batches)}] ...")
+                                if new_questions:
+                                    for nq in new_questions:
+                                        raw_opts = nq.get('options', [])
+                                        opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                                    conn.commit()
+                                    total_imported += len(new_questions)
+                                    time.sleep(12) # 5 RPM 安全防護，每次間隔 12 秒
+                                    break
+                            except Exception as e: 
+                                err_str = str(e)
+                                if "429" in err_str or "quota" in err_str.lower():
+                                    status_box.markdown("⚠️ 觸發頻率限制 (429)，自動休眠 14 秒後重新嘗試...")
+                                    time.sleep(14)
+                                else:
+                                    time.sleep(4)
+                                if attempt == 3:
+                                    errors_encountered.append(err_str)
+                                    
+                        prog_bar.progress((b_idx + 1) / len(text_batches))
                     
                     status_box.empty()
                     prog_bar.empty()
