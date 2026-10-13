@@ -237,7 +237,7 @@ def get_question_bilingual(q, target_lang="en"):
 
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3.8-flash')
+        model = genai.GenerativeModel('gemini-3.5-flash')
         lang_target_desc = "專業醫學英文 (USMLE English)" if target_lang == "en" else "繁體中文（台灣醫學常用術語）"
         prompt = f'請將以下醫學/生化選擇題翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n【規範】以標準 JSON 格式輸出：\n{{"text": "翻譯後的題目", "options": ["選項1", "選項2", ...]}}'
         resp = model.generate_content(prompt, request_options={"timeout": 45})
@@ -483,7 +483,7 @@ with tab_practice:
                         with st.spinner("撰寫中..."):
                             try:
                                 genai.configure(api_key=api_key)
-                                resp = genai.GenerativeModel('gemini-3.8-flash').generate_content(f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。", request_options={"timeout": 60})
+                                resp = genai.GenerativeModel('gemini-3.5-flash').generate_content(f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。", request_options={"timeout": 60})
                                 c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text.strip(), curr_q_id))
                                 conn.commit()
                                 curr_q['explanation'] = resp.text.strip()
@@ -851,7 +851,7 @@ with tab_ai_gen:
                             try:
                                 genai.configure(api_key=api_key)
                                 ai_prompt = f"Analyze these questions from '{gen_target_pdf}':\n{sample_context}\n\nTASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\nRULES:\n1. Options in English (4 or 5 choices).\n2. Provide best answer.\n3. Explanation in Traditional Chinese.\n4. Output JSON array only:\n" + '[{"text": "...", "options": ["A. ...", "B. ..."], "answer": "A", "explanation": "..."}]'
-                                resp = genai.GenerativeModel('gemini-3.8-flash').generate_content(ai_prompt, request_options={"timeout": 120})
+                                resp = genai.GenerativeModel('gemini-3.5-flash').generate_content(ai_prompt, request_options={"timeout": 120})
                                 raw = resp.text.strip()
                                 parsed_list = extract_json_questions(raw)
                                 st.session_state.ai_generated_temp = parsed_list
@@ -952,7 +952,7 @@ with tab_import:
                     
                     def process_file_chunk(b_content):
                         genai.configure(api_key=api_key)
-                        model_thread = genai.GenerativeModel('gemini-3.8-flash')
+                        model_thread = genai.GenerativeModel('gemini-3.5-flash')
                         last_err = ""
                         for attempt in range(3):
                             try:
@@ -988,7 +988,7 @@ with tab_import:
                     status_box.empty()
                     prog_bar.empty()
                     if total_imported > 0:
-                        st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
+                        st.success(f"🎉 成功存入 {total_imported} 題！")
                         time.sleep(1)
                         st.rerun()
                     else:
@@ -1017,7 +1017,7 @@ with tab_import:
                     
                     def process_text_chunk(batch_text):
                         genai.configure(api_key=api_key)
-                        model_thread = genai.GenerativeModel('gemini-3.8-flash')
+                        model_thread = genai.GenerativeModel('gemini-3.5-flash')
                         last_err = ""
                         for attempt in range(3):
                             try:
