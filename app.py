@@ -21,6 +21,13 @@ except ImportError:
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
 TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE4NzkzMDksImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.6jTw0MrLdAEMzRubZj0lqOaZwS3X3oDzbgP707x6qEXXbuCXgxdgA9MmEjQfxYomwujYU5oW41kTUSKvE3e0Bw"
 
+CANDIDATE_MODELS = [
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-2.0-flash',
+    'gemini-pro'
+]
+
 class RowDict(dict):
     def __getitem__(self, item):
         if isinstance(item, int): return list(self.values())[item]
@@ -217,14 +224,15 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 保證成功匯入：自動解析與 429 智慧休眠重試機制
+# 🌟 自動備援模型、防 404 與 429 智慧休眠重試機制
 def call_gemini_guaranteed(content, api_key, status_box=None):
     genai.configure(api_key=api_key)
-    # 使用穩定高額度 1.5-flash，保證 15 RPM
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    last_err = ""
     
-    for attempt in range(5):
+    for attempt in range(len(CANDIDATE_MODELS) * 2):
+        model_name = CANDIDATE_MODELS[attempt % len(CANDIDATE_MODELS)]
         try:
+            model = genai.GenerativeModel(model_name)
             resp = model.generate_content(content, request_options={"timeout": 120})
             raw = resp.text.strip()
             res = extract_json_questions(raw)
@@ -232,18 +240,34 @@ def call_gemini_guaranteed(content, api_key, status_box=None):
                 return res, None
         except Exception as e:
             err_str = str(e)
+            last_err = err_str
             if "429" in err_str or "quota" in err_str.lower():
                 delay_match = re.search(r'seconds:\s*(\d+)', err_str)
                 wait_sec = int(delay_match.group(1)) + 2 if delay_match else 45
                 if status_box:
                     status_box.warning(f"⏳ 觸發 API 頻率保護，自動冷卻中：剩餘 {wait_sec} 秒後將自動接續匯入...")
                 time.sleep(wait_sec)
+            elif "404" in err_str or "not found" in err_str.lower():
+                if status_box:
+                    status_box.info(f"🔄 模型 {model_name} 端點無效，正在切換備用模型...")
+                time.sleep(1)
             else:
-                time.sleep(4)
-                if attempt == 4:
-                    return [], err_str
+                time.sleep(2)
 
-    return [], "重試次數已達上限，請稍後再試。"
+    return [], f"呼叫失敗，請檢查 API Key 或網路連線（錯誤訊息：{last_err}）"
+
+# 🌟 單純文字生成多模型備援引擎
+def call_gemini_text_fallback(prompt, api_key):
+    genai.configure(api_key=api_key)
+    for model_name in CANDIDATE_MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt, request_options={"timeout": 60})
+            if resp and resp.text:
+                return resp.text.strip()
+        except:
+            continue
+    return None
 
 # 🌟 雙語切換處理引擎
 def get_question_bilingual(q, target_lang="en"):
@@ -506,15 +530,15 @@ with tab_practice:
                     if not api_key: st.error("請先輸入 API Key！")
                     else:
                         with st.spinner("撰寫中..."):
-                            try:
-                                exp_prompt = f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。"
-                                genai.configure(api_key=api_key)
-                                resp = genai.GenerativeModel('gemini-1.5-flash').generate_content(exp_prompt, request_options={"timeout": 60})
-                                c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text.strip(), curr_q_id))
+                            exp_prompt = f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。"
+                            ai_res = call_gemini_text_fallback(exp_prompt, api_key)
+                            if ai_res:
+                                c.execute("UPDATE questions SET explanation=? WHERE id=?", (ai_res, curr_q_id))
                                 conn.commit()
-                                curr_q['explanation'] = resp.text.strip()
+                                curr_q['explanation'] = ai_res
                                 st.rerun()
-                            except: st.error("AI 生成失敗")
+                            else:
+                                st.error("AI 生成失敗，請確認 API Key 與模型配額。")
 
             c.execute("SELECT explanation_image FROM questions WHERE id=?", (curr_q_id,))
             img_row = c.fetchone()
@@ -987,7 +1011,7 @@ with tab_import:
                             errors_encountered.append(err_msg)
                             
                         prog_bar.progress((b_idx + 1) / len(batches))
-                        time.sleep(3) # 安全休眠間隔
+                        time.sleep(3)
                         
                     status_box.empty()
                     prog_bar.empty()
@@ -1037,7 +1061,7 @@ with tab_import:
                             errors_encountered.append(err_msg)
                             
                         prog_bar.progress((b_idx + 1) / len(text_batches))
-                        time.sleep(3) # 安全休眠間隔
+                        time.sleep(3)
                     
                     status_box.empty()
                     prog_bar.empty()
