@@ -231,7 +231,7 @@ def get_valid_model_list(api_key):
         return [], f"API 連線驗證失敗：{str(e)}"
     
     if not supported_models:
-        return [], "您的 API Key 無法存取任何生成模型，請確認是否為 Google AI Studio 所簽發的有效金鑰。"
+        return [], "您的 API Key 無法存取任何生成模型，請確認是否為 Google AI Studio 簽發的有效金鑰。"
         
     ordered_models = []
     preferred = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-pro']
@@ -244,7 +244,7 @@ def get_valid_model_list(api_key):
             
     return ordered_models, None
 
-# 🌟 保證成功匯入：自動探測模型、429 休眠與多備援容錯機制
+# 🌟 保證成功匯入：自動探測模型、防呆冷卻與上限熔斷機制
 def call_gemini_guaranteed(content, api_key, status_box=None):
     clean_key = api_key.strip()
     candidate_models, err = get_valid_model_list(clean_key)
@@ -266,9 +266,14 @@ def call_gemini_guaranteed(content, api_key, status_box=None):
             last_error = err_str
             if "429" in err_str or "quota" in err_str.lower():
                 delay_match = re.search(r'seconds:\s*(\d+)', err_str)
-                wait_sec = int(delay_match.group(1)) + 2 if delay_match else 45
+                wait_sec = int(delay_match.group(1)) + 2 if delay_match else 30
+                
+                # 🛡️ 熔斷保護：若冷卻時間超過 60 秒，代表今日總額度 (RPD) 已耗盡，不再等待
+                if wait_sec > 60:
+                    return [], f"🚨 該 API Key 今日免費額度已耗盡（Google 要求等待 {wait_sec//3600} 小時），請前往「⚙️ 設定」更換另一組 API Key 即可立刻繼續！"
+                
                 if status_box:
-                    status_box.warning(f"⏳ 觸發 API 頻率保護，自動冷卻中：剩餘 {wait_sec} 秒後將自動接續匯入...")
+                    status_box.warning(f"⏳ 觸發每分鐘頻率保護，冷卻中：剩餘 {wait_sec} 秒後將自動重試...")
                 time.sleep(wait_sec)
             else:
                 time.sleep(2)
