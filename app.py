@@ -21,13 +21,6 @@ except ImportError:
 TURSO_DB_URL = "libsql://quiz-db-tony080830-coder.aws-ap-northeast-1.turso.io"
 TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTE4NzkzMDksImlkIjoiMDFhMGRiYTUtYmIwMS03MDkwLTgxM2UtNDUwODgwZGQ5MDdhIiwia2lkIjoiRG5HUXMycy13c0VfNkc5Szlnbms4cENlYWJ0NjZRcF9yUUhNYVU1aUhLSSIsInJpZCI6ImM0ZDI0Mjc1LTVmNzQtNGZkMi05M2Y5LTk1ZjRjMWExNWQ4MCJ9.6jTw0MrLdAEMzRubZj0lqOaZwS3X3oDzbgP707x6qEXXbuCXgxdgA9MmEjQfxYomwujYU5oW41kTUSKvE3e0Bw"
 
-CANDIDATE_MODELS = [
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-2.0-flash',
-    'gemini-pro'
-]
-
 class RowDict(dict):
     def __getitem__(self, item):
         if isinstance(item, int): return list(self.values())[item]
@@ -140,7 +133,7 @@ def get_api_key():
     try:
         c.execute("SELECT value FROM settings WHERE key='gemini_api_key'")
         res = c.fetchone()
-        return res['value'] if res else ""
+        return res['value'].strip() if res and res['value'] else ""
     except: return ""
 
 def get_categories_by_folder(folder=None, only_star=False):
@@ -224,45 +217,73 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 自動備援模型、防 404 與 429 智慧休眠重試機制
-def call_gemini_guaranteed(content, api_key, status_box=None):
-    genai.configure(api_key=api_key)
-    last_err = ""
+# 🌟 動態探測 API Key 真正可用的模型名稱
+def get_valid_model_list(api_key):
+    clean_key = api_key.strip()
+    genai.configure(api_key=clean_key)
+    supported_models = []
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                model_pure_name = m.name.replace('models/', '')
+                supported_models.append(model_pure_name)
+    except Exception as e:
+        return [], f"API 連線驗證失敗：{str(e)}"
     
-    for attempt in range(len(CANDIDATE_MODELS) * 2):
-        model_name = CANDIDATE_MODELS[attempt % len(CANDIDATE_MODELS)]
+    if not supported_models:
+        return [], "您的 API Key 無法存取任何生成模型，請確認是否為 Google AI Studio 所簽發的有效金鑰。"
+        
+    ordered_models = []
+    preferred = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-pro']
+    for p in preferred:
+        if p in supported_models and p not in ordered_models:
+            ordered_models.append(p)
+    for m in supported_models:
+        if m not in ordered_models:
+            ordered_models.append(m)
+            
+    return ordered_models, None
+
+# 🌟 保證成功匯入：自動探測模型、429 休眠與多備援容錯機制
+def call_gemini_guaranteed(content, api_key, status_box=None):
+    clean_key = api_key.strip()
+    candidate_models, err = get_valid_model_list(clean_key)
+    if not candidate_models:
+        return [], err
+
+    last_error = ""
+    for attempt in range(len(candidate_models) * 2):
+        model_name = candidate_models[attempt % len(candidate_models)]
         try:
             model = genai.GenerativeModel(model_name)
             resp = model.generate_content(content, request_options={"timeout": 120})
-            raw = resp.text.strip()
-            res = extract_json_questions(raw)
-            if res:
-                return res, None
+            if resp and resp.text:
+                res = extract_json_questions(resp.text.strip())
+                if res:
+                    return res, None
         except Exception as e:
             err_str = str(e)
-            last_err = err_str
+            last_error = err_str
             if "429" in err_str or "quota" in err_str.lower():
                 delay_match = re.search(r'seconds:\s*(\d+)', err_str)
                 wait_sec = int(delay_match.group(1)) + 2 if delay_match else 45
                 if status_box:
                     status_box.warning(f"⏳ 觸發 API 頻率保護，自動冷卻中：剩餘 {wait_sec} 秒後將自動接續匯入...")
                 time.sleep(wait_sec)
-            elif "404" in err_str or "not found" in err_str.lower():
-                if status_box:
-                    status_box.info(f"🔄 模型 {model_name} 端點無效，正在切換備用模型...")
-                time.sleep(1)
             else:
                 time.sleep(2)
 
-    return [], f"呼叫失敗，請檢查 API Key 或網路連線（錯誤訊息：{last_err}）"
+    return [], f"呼叫失敗（{last_error}）"
 
-# 🌟 單純文字生成多模型備援引擎
+# 🌟 單純文字生成專用多模型自動容錯
 def call_gemini_text_fallback(prompt, api_key):
-    genai.configure(api_key=api_key)
-    for model_name in CANDIDATE_MODELS:
+    clean_key = api_key.strip()
+    models, _ = get_valid_model_list(clean_key)
+    if not models: return None
+    for m_name in models:
         try:
-            model = genai.GenerativeModel(model_name)
-            resp = model.generate_content(prompt, request_options={"timeout": 60})
+            m = genai.GenerativeModel(m_name)
+            resp = m.generate_content(prompt, request_options={"timeout": 60})
             if resp and resp.text:
                 return resp.text.strip()
         except:
@@ -538,7 +559,7 @@ with tab_practice:
                                 curr_q['explanation'] = ai_res
                                 st.rerun()
                             else:
-                                st.error("AI 生成失敗，請確認 API Key 與模型配額。")
+                                st.error("AI 生成失敗，請確認 API Key。")
 
             c.execute("SELECT explanation_image FROM questions WHERE id=?", (curr_q_id,))
             img_row = c.fetchone()
@@ -1083,7 +1104,8 @@ with tab_settings:
         st.subheader("🔑 API Key 設定")
         new_key = st.text_input("輸入 Gemini API Key", value=get_api_key(), type="password")
         if st.button("儲存設定"):
-            c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (new_key,))
+            clean_input_key = new_key.strip()
+            c.execute("REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)", (clean_input_key,))
             conn.commit()
             st.success("設定已儲存！")
 
