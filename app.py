@@ -183,6 +183,7 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
+# 🌟 防彈 JSON 解析器
 def extract_json_questions(raw_text):
     raw = raw_text.strip()
     try:
@@ -216,7 +217,35 @@ def extract_json_questions(raw_text):
         
     return []
 
-# 🌟 雙語切換處理引擎 (使用 gemini-3.6-flash)
+# 🌟 保證成功匯入：自動解析與 429 智慧休眠重試機制
+def call_gemini_guaranteed(content, api_key, status_box=None):
+    genai.configure(api_key=api_key)
+    # 使用穩定高額度 1.5-flash，保證 15 RPM
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    for attempt in range(5):
+        try:
+            resp = model.generate_content(content, request_options={"timeout": 120})
+            raw = resp.text.strip()
+            res = extract_json_questions(raw)
+            if res:
+                return res, None
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "quota" in err_str.lower():
+                delay_match = re.search(r'seconds:\s*(\d+)', err_str)
+                wait_sec = int(delay_match.group(1)) + 2 if delay_match else 45
+                if status_box:
+                    status_box.warning(f"⏳ 觸發 API 頻率保護，自動冷卻中：剩餘 {wait_sec} 秒後將自動接續匯入...")
+                time.sleep(wait_sec)
+            else:
+                time.sleep(4)
+                if attempt == 4:
+                    return [], err_str
+
+    return [], "重試次數已達上限，請稍後再試。"
+
+# 🌟 雙語切換處理引擎
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -235,13 +264,10 @@ def get_question_bilingual(q, target_lang="en"):
     if not api_key: return orig_text, orig_opts
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3.6-flash')
         lang_target_desc = "專業醫學英文 (USMLE English)" if target_lang == "en" else "繁體中文（台灣醫學常用術語）"
         prompt = f'請將以下醫學/生化選擇題翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n【規範】以標準 JSON 格式輸出：\n{{"text": "翻譯後的題目", "options": ["選項1", "選項2", ...]}}'
-        resp = model.generate_content(prompt, request_options={"timeout": 60})
-        raw = resp.text.strip()
-        parsed_list = extract_json_questions(raw)
+        
+        parsed_list, _ = call_gemini_guaranteed(prompt, api_key)
         parsed = parsed_list[0] if parsed_list else {}
         
         trans_text = parsed.get('text', orig_text)
@@ -481,8 +507,9 @@ with tab_practice:
                     else:
                         with st.spinner("撰寫中..."):
                             try:
+                                exp_prompt = f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。"
                                 genai.configure(api_key=api_key)
-                                resp = genai.GenerativeModel('gemini-3.6-flash').generate_content(f"題目：{disp_text}\n選項：{disp_options}\n正確答案：{curr_q['answer']}\n請用繁體中文詳解原因與機轉。", request_options={"timeout": 60})
+                                resp = genai.GenerativeModel('gemini-1.5-flash').generate_content(exp_prompt, request_options={"timeout": 60})
                                 c.execute("UPDATE questions SET explanation=? WHERE id=?", (resp.text.strip(), curr_q_id))
                                 conn.commit()
                                 curr_q['explanation'] = resp.text.strip()
@@ -848,11 +875,8 @@ with tab_ai_gen:
                         sample_context = "\n".join([f"Q: {s['text']} | Opts: {', '.join(get_question_options(s))} | Ans: {s['answer']}" for s in sample_rows])
                         with st.spinner(f"AI 正在撰寫 {gen_q_count} 道全英文仿題..."):
                             try:
-                                genai.configure(api_key=api_key)
                                 ai_prompt = f"Analyze these questions from '{gen_target_pdf}':\n{sample_context}\n\nTASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\nRULES:\n1. Options in English (4 or 5 choices).\n2. Provide best answer.\n3. Explanation in Traditional Chinese.\n4. Output JSON array only:\n" + '[{"text": "...", "options": ["A. ...", "B. ..."], "answer": "A", "explanation": "..."}]'
-                                resp = genai.GenerativeModel('gemini-3.6-flash').generate_content(ai_prompt, request_options={"timeout": 120})
-                                raw = resp.text.strip()
-                                parsed_list = extract_json_questions(raw)
+                                parsed_list, _ = call_gemini_guaranteed(ai_prompt, api_key)
                                 st.session_state.ai_generated_temp = parsed_list
                                 st.toast("🎉 生成完畢！")
                             except Exception as e: st.error(f"失敗：{e}")
@@ -894,15 +918,15 @@ with tab_import:
         import_mode = st.radio("匯入方式：", ["📁 模式一：檔案上傳", "📋 模式二：純文字貼上 (自動分割長文)"])
         
         parse_prompt = (
-            "你是一個專業的測驗題庫解析助手。請從下列提供的文字中，精準提取出所有的「選擇題」。\n"
+            "你是一個專業的測驗題庫解析助手。請從下列提供的文字中，精準提取出所有的選擇題。\n"
             "【極端排版容錯處理規則】\n"
             "1. 即使題目、選項 (A)(B)(C)(D)、答案、解析全部黏在同一行或完全沒有換行，也請利用語意分析精確分離出題目、各個選項、答案與解析！\n"
             "2. text：完整的題目問題敘述。\n"
-            "3. options：將所有選項切開還原為陣列，例如 [\"(A) ...\", \"(B) ...\", \"(C) ...\", \"(D) ...\"]。\n"
-            "4. answer：正確答案代號（例如 \"A\" 或 \"D\"）。若文字中有標註解答請直接填入。\n"
-            "5. explanation：詳解或解析說明，若無則填空字串 \"\"。\n"
+            '3. options：將所有選項切開還原為陣列，例如 ["(A) ...", "(B) ..."]。\n'
+            "4. answer：正確答案代號（例如 A 或 D）。若文字中有標註解答請直接填入。\n"
+            '5. explanation：詳解或解析說明，若無則填空字串 ""。\n'
             "6. 格式要求：嚴格輸出 JSON 陣列 (Array)，絕對不要輸出任何前後 Markdown 標籤或說明文字！\n"
-            '範例：[{"text":"題目敘述","options":["(A)選項1","(B)選項2","(C)選項3","(D)選項4"],"answer":"D","explanation":"解析"}]'
+            '範例：[{"text":"題目敘述","options":["(A)選項1","(B)選項2"],"answer":"D","explanation":"解析"}]'
         )
 
         if import_mode.startswith("📁"):
@@ -918,7 +942,6 @@ with tab_import:
                     fname = uploaded_file.name.lower()
                     file_bytes = uploaded_file.getvalue()
                     final_name = custom_name.strip() if custom_name else uploaded_file.name
-                    genai.configure(api_key=api_key)
                     batches = []
                     
                     if fname.endswith('.pdf'):
@@ -949,42 +972,27 @@ with tab_import:
                     total_imported = 0
                     errors_encountered = []
                     
-                    model_seq = genai.GenerativeModel('gemini-3.6-flash')
-                    
                     for b_idx, b_info in enumerate(batches):
                         status_box.markdown(f"⏳ 處理 {b_info['title']} [{b_idx+1}/{len(batches)}] ...")
-                        
-                        for attempt in range(4):
-                            try:
-                                resp = model_seq.generate_content(b_info['content'], request_options={"timeout": 120})
-                                raw = resp.text.strip()
-                                chunk_questions = extract_json_questions(raw)
+                        chunk_questions, err_msg = call_gemini_guaranteed(b_info['content'], api_key, status_box)
 
-                                if chunk_questions:
-                                    for nq in chunk_questions:
-                                        opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
-                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                    conn.commit()
-                                    total_imported += len(chunk_questions)
-                                    time.sleep(12) # 5 RPM 安全防護，每次間隔 12 秒
-                                    break
-                            except Exception as e: 
-                                err_str = str(e)
-                                if "429" in err_str or "quota" in err_str.lower():
-                                    status_box.markdown("⚠️ 觸發頻率限制 (429)，自動休眠 14 秒後重新嘗試...")
-                                    time.sleep(14)
-                                else:
-                                    time.sleep(4)
-                                if attempt == 3:
-                                    errors_encountered.append(err_str)
-                                    
+                        if chunk_questions:
+                            for nq in chunk_questions:
+                                opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
+                                opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                            conn.commit()
+                            total_imported += len(chunk_questions)
+                        elif err_msg:
+                            errors_encountered.append(err_msg)
+                            
                         prog_bar.progress((b_idx + 1) / len(batches))
+                        time.sleep(3) # 安全休眠間隔
                         
                     status_box.empty()
                     prog_bar.empty()
                     if total_imported > 0:
-                        st.success(f"🎉 成功分批解析並存入共 {total_imported} 題！")
+                        st.success(f"🎉 成功存入 {total_imported} 題！")
                         time.sleep(1)
                         st.rerun()
                     else:
@@ -1000,51 +1008,36 @@ with tab_import:
                 if not api_key:
                     st.error("請先前往「⚙️ 設定」輸入 Gemini API Key！")
                 else:
-                    if len(ptext) <= 4000:
+                    if len(ptext) <= 5000:
                         text_batches = [ptext]
                     else:
                         lines = ptext.split('\n')
-                        chunk_size = 50 
+                        chunk_size = 60 
                         text_batches = ['\n'.join(lines[i:i+chunk_size]) for i in range(0, len(lines), chunk_size) if '\n'.join(lines[i:i+chunk_size]).strip()]
 
                     prog_bar, status_box = st.progress(0.0), st.empty()
                     total_imported = 0
                     errors_encountered = []
                     
-                    genai.configure(api_key=api_key)
-                    model_seq = genai.GenerativeModel('gemini-3.6-flash')
-                    
                     for b_idx, batch_text in enumerate(text_batches):
                         status_box.markdown(f"⏳ 正在分析純文字區塊 [{b_idx+1}/{len(text_batches)}] ...")
                         if not batch_text.strip(): continue
                         
-                        for attempt in range(4):
-                            try:
-                                resp = model_seq.generate_content([parse_prompt, batch_text], request_options={"timeout": 120})
-                                raw = resp.text.strip()
-                                new_questions = extract_json_questions(raw)
-                                
-                                if new_questions:
-                                    for nq in new_questions:
-                                        raw_opts = nq.get('options', [])
-                                        opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
-                                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
-                                    conn.commit()
-                                    total_imported += len(new_questions)
-                                    time.sleep(12) # 5 RPM 安全防護，每次間隔 12 秒
-                                    break
-                            except Exception as e: 
-                                err_str = str(e)
-                                if "429" in err_str or "quota" in err_str.lower():
-                                    status_box.markdown("⚠️ 觸發頻率限制 (429)，自動休眠 14 秒後重新嘗試...")
-                                    time.sleep(14)
-                                else:
-                                    time.sleep(4)
-                                if attempt == 3:
-                                    errors_encountered.append(err_str)
-                                    
+                        new_questions, err_msg = call_gemini_guaranteed([parse_prompt, batch_text], api_key, status_box)
+                        
+                        if new_questions:
+                            for nq in new_questions:
+                                raw_opts = nq.get('options', [])
+                                opts_clean = [str(o).strip() for o in raw_opts if str(o).strip()]
+                                opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                                c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)", (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
+                            conn.commit()
+                            total_imported += len(new_questions)
+                        elif err_msg:
+                            errors_encountered.append(err_msg)
+                            
                         prog_bar.progress((b_idx + 1) / len(text_batches))
+                        time.sleep(3) # 安全休眠間隔
                     
                     status_box.empty()
                     prog_bar.empty()
