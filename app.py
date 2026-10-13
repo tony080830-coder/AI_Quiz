@@ -183,118 +183,123 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 超強本地免 AI 解析引擎（徹底修復「解答誤截斷」，32 題完整精準切分）
+# 🌟 單題專用深度剖析器（專治黏連排版、無空格選項）
+def parse_single_question_block(b):
+    if not b or len(b.strip()) < 10:
+        return None
+
+    # 1. 抓取答案 (Answer)
+    ans = ""
+    m_ans = re.search(r'(?:解答|答案|正解|Ans|Key)\s*[:：\s]*([A-Ea-e])\b', b, re.IGNORECASE)
+    if m_ans:
+        ans = m_ans.group(1).upper()
+    else:
+        m_ans_bracket = re.search(r'(?:解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]([A-Ea-e])[\)）]', b, re.IGNORECASE)
+        if m_ans_bracket:
+            ans = m_ans_bracket.group(1).upper()
+
+    # 2. 抓取解析 (Explanation)
+    exp = ""
+    m_exp = re.search(r'(?:解析|詳解|說明|Explanation)\s*[:：\s]*([\s\S]*)$', b, re.IGNORECASE)
+    if m_exp:
+        exp = m_exp.group(1).strip()
+
+    # 3. 移除答案與解析，取得題目與選項主幹
+    pos_ans = m_ans.start() if m_ans else len(b)
+    pos_exp = m_exp.start() if m_exp else len(b)
+    earliest_meta = min(pos_ans, pos_exp)
+    q_opts_part = b[:earliest_meta].strip()
+
+    # 4. 順序剖析 A -> B -> C -> D (容忍任何前綴黏連)
+    m_A = re.search(r'(?:[\(（]A[\)）]|A[\.\、\)])\s*', q_opts_part, re.IGNORECASE)
+    if not m_A:
+        return None
+    pos_A = m_A.start()
+    len_A = m_A.end() - m_A.start()
+
+    sub_B = q_opts_part[pos_A + len_A:]
+    m_B = re.search(r'(?:[\(（]B[\)）]|B[\.\、\)])\s*', sub_B, re.IGNORECASE)
+    if not m_B:
+        return None
+    pos_B = pos_A + len_A + m_B.start()
+    len_B = m_B.end() - m_B.start()
+
+    sub_C = q_opts_part[pos_B + len_B:]
+    m_C = re.search(r'(?:[\(（]C[\)）]|C[\.\、\)])\s*', sub_C, re.IGNORECASE)
+    if not m_C:
+        return None
+    pos_C = pos_B + len_B + m_C.start()
+    len_C = m_C.end() - m_C.start()
+
+    sub_D = q_opts_part[pos_C + len_C:]
+    m_D = re.search(r'(?:[\(（]D[\)）]|D[\.\、\)])\s*', sub_D, re.IGNORECASE)
+    pos_D = pos_C + len_C + m_D.start() if m_D else len(q_opts_part)
+    len_D = m_D.end() - m_D.start() if m_D else 0
+
+    pos_E = len(q_opts_part)
+    len_E = 0
+    if m_D:
+        sub_E = q_opts_part[pos_D + len_D:]
+        m_E = re.search(r'(?:[\(（]E[\)）]|E[\.\、\)])\s*', sub_E, re.IGNORECASE)
+        if m_E:
+            pos_E = pos_D + len_D + m_E.start()
+            len_E = m_E.end() - m_E.start()
+
+    # 5. 提取題幹與各選項內容
+    stem = q_opts_part[:pos_A].strip()
+    # 移除開頭題號（支援 22-27. 或 Q1. 或 1.）
+    stem = re.sub(r'^(?:(?:[Qq]|第\s*)?(\d+(?:[-_.]\d+)?)\s*[\.、\:\)）\s]+|[\(（\[](\d+(?:[-_.]\d+)?)[\)）\]]\s*)', '', stem).strip()
+
+    opt_A = q_opts_part[pos_A + len_A : pos_B].strip()
+    opt_B = q_opts_part[pos_B + len_B : pos_C].strip()
+    opt_C = q_opts_part[pos_C + len_C : pos_D].strip()
+    opt_D = q_opts_part[pos_D + len_D : pos_E].strip() if m_D else ""
+
+    options = [f"(A) {opt_A}", f"(B) {opt_B}", f"(C) {opt_C}"]
+    if opt_D:
+        options.append(f"(D) {opt_D}")
+    if len_E > 0:
+        opt_E = q_opts_part[pos_E + len_E:].strip()
+        options.append(f"(E) {opt_E}")
+
+    if not ans:
+        ans = "A"
+
+    return {
+        "text": stem,
+        "options": options,
+        "answer": ans,
+        "explanation": exp
+    }
+
+# 🌟 全文全自動切題引擎（精準識別連字號題號 22-27. 並完整還原所有題目）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 1. 抓取文末集中解答區（只有在出現明確的「獨立解答段落」才處理）
-    ans_key_map = {}
-    summary_ans_match = re.search(r'\n\s*(?:【?\s*(?:參考答案|總解答|答案表|Answer Key)\s*】?|解答\s*[:：])\s*\n([\s\S]+)$', text, re.IGNORECASE)
-    if summary_ans_match:
-        ans_block = summary_ans_match.group(1)
-        for am in re.finditer(r'(?:(?:第|Q)?\s*(\d+)\s*(?:題|[\.\、\)\:\-\s]))?\s*([A-Ea-e])\b', ans_block):
-            q_num, a_val = am.group(1), am.group(2)
-            if q_num:
-                ans_key_map[int(q_num)] = a_val.upper()
-        text = text[:summary_ans_match.start()]
-
-    # 2. 智慧尋找題號分界點 (支援 1. / 1、 / (1) / 1) / Q1. / 第1題 / [1])
-    q_num_patterns = [
-        r'(?:^|\n)\s*(?:[Qq]?\s*(\d+)\s*[\.\、\)\:\–\-\s]|第\s*(\d+)\s*題|[\(（\[](\d+)[\)）\]]\s*)',
-        r'(?<=\s)(?:[Qq]?\s*(\d+)\s*[\.\、\)\:\–\-]|第\s*(\d+)\s*題|[\(（\[](\d+)[\)）\]])\s*'
-    ]
-
-    found_splits = []
-    splits_line = list(re.finditer(q_num_patterns[0], text))
-    if len(splits_line) >= 2:
-        found_splits = splits_line
-    else:
-        splits_space = list(re.finditer(q_num_patterns[1], text))
-        if len(splits_space) >= 2:
-            found_splits = splits_space
+    # 正則匹配題號起點：支援 22-27. / 22-28. / 1. / Q1. 等
+    q_split_regex = r'(?:(?<=[\s。！？；\n])|^)\s*(?:(?:[Qq]|第\s*)?(\d+(?:[-_]\d+)?)\s*[\.、\:\)）]|[\(（\[](\d+(?:[-_]\d+)?)[\)）\]]\s*)'
+    found_splits = list(re.finditer(q_split_regex, text))
 
     blocks = []
-    if found_splits:
+    if len(found_splits) >= 2:
         for i in range(len(found_splits)):
             start = found_splits[i].start()
             end = found_splits[i+1].start() if i + 1 < len(found_splits) else len(text)
             blocks.append(text[start:end].strip())
     else:
+        # 單題或無明顯規律時退回段落分割
         blocks = [b.strip() for b in text.split('\n\n') if len(b.strip()) > 10]
+        if not blocks:
+            blocks = [text.strip()]
 
     parsed_questions = []
-    for idx, b in enumerate(blocks, start=1):
-        if not b: continue
-
-        m_qnum = re.search(r'^(?:[Qq]?\s*(\d+)|第\s*(\d+)\s*題|[\(（\[](\d+)[\)）\]])', b)
-        actual_q_num = idx
-        if m_qnum:
-            num_str = m_qnum.group(1) or m_qnum.group(2) or m_qnum.group(3)
-            if num_str and num_str.isdigit():
-                actual_q_num = int(num_str)
-
-        # 抓取個別題目的答案（支援 答案：A、正解為 B、Ans: C、(A)）
-        ans_patterns = [
-            r'(?:【?\s*(?:答案|正解|Ans|Key|解答)\s*】?[:：\s]*([A-Ea-e]))',
-            r'(?:(?<=答案為)|(?<=正解為)|(?<=選擇))\s*([A-Ea-e])\b',
-            r'[\(（]\s*([A-Ea-e])\s*[\)）]\s*(?=(?:\(?\d+[\.\、\)]|\n|$))'
-        ]
-        answer = ""
-        for ap in ans_patterns:
-            m_ans = re.search(ap, b, re.IGNORECASE)
-            if m_ans:
-                answer = m_ans.group(1).upper()
-                break
-        
-        if not answer and actual_q_num in ans_key_map:
-            answer = ans_key_map[actual_q_num]
-
-        # 尋找選項起點 (A/B/C/D 或 (A)/(B)/(C)/(D) 或 A./B./C./D. 或 A、B、C、D、)
-        opt_regex = r'(?:[\n\s]|^)(?:[\(（\[]?([A-Ea-e])[\)）\]\.\、\:\s])(?=[^\n])'
-        opt_matches = list(re.finditer(opt_regex, b))
-        
-        options = []
-        q_stem = ""
-        if len(opt_matches) >= 2:
-            q_stem = b[:opt_matches[0].start()].strip()
-            for o_i in range(len(opt_matches)):
-                o_start = opt_matches[o_i].end()
-                o_end = opt_matches[o_i+1].start() if o_i + 1 < len(opt_matches) else len(b)
-                opt_letter = opt_matches[o_i].group(1).upper()
-                opt_content = b[o_start:o_end].strip()
-                opt_content = re.sub(r'【?\s*(?:答案|正解|Ans|Key|解答)[:：\s]*[A-Ea-e]?\s*】?', '', opt_content, flags=re.IGNORECASE).strip()
-                options.append(f"({opt_letter}) {opt_content}")
-        else:
-            opt_num_regex = r'(?:[\n\s]|^)(?:[\(（\[]?([1-4])[\)）\]\.\、\:\s])(?=[^\n])'
-            opt_num_matches = list(re.finditer(opt_num_regex, b))
-            if len(opt_num_matches) >= 2:
-                q_stem = b[:opt_num_matches[0].start()].strip()
-                letter_map = {"1": "A", "2": "B", "3": "C", "4": "D"}
-                for o_i in range(len(opt_num_matches)):
-                    o_start = opt_num_matches[o_i].end()
-                    o_end = opt_num_matches[o_i+1].start() if o_i + 1 < len(opt_num_matches) else len(b)
-                    num_char = opt_num_matches[o_i].group(1)
-                    opt_letter = letter_map.get(num_char, "A")
-                    opt_content = b[o_start:o_end].strip()
-                    opt_content = re.sub(r'【?\s*(?:答案|正解|Ans|Key|解答)[:：\s]*[A-Ea-e]?\s*】?', '', opt_content, flags=re.IGNORECASE).strip()
-                    options.append(f"({opt_letter}) {opt_content}")
-            else:
-                continue
-
-        # 清理題幹開頭題號與雜訊
-        q_stem = re.sub(r'^(?:[Qq]?\s*\d+\s*[\.\、\)\:\–\-\s]+|第\s*\d+\s*題[\s\:\.]*|[\(（\[]\d+[\)）\]]\s*)', '', q_stem).strip()
-        q_stem = re.sub(r'【?\s*(?:答案|正解|Ans|Key|解答)[:：\s]*[A-Ea-e]?\s*】?', '', q_stem, flags=re.IGNORECASE).strip()
-
-        if q_stem and len(options) >= 2:
-            parsed_questions.append({
-                "text": q_stem,
-                "options": options,
-                "answer": answer if answer else "A",
-                "explanation": ""
-            })
+    for b in blocks:
+        item = parse_single_question_block(b)
+        if item and item['text'] and len(item['options']) >= 2:
+            parsed_questions.append(item)
 
     return parsed_questions
 
@@ -926,7 +931,7 @@ with tab_ai_gen:
     st.markdown("### 🧠 AI 模擬出題")
     st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」換上全新 Gmail 申請的 API Key。")
 
-# ---------- 【📥 分頁五：匯入區 (全面支援極速本地正則引擎)】 ----------
+# ---------- 【📥 分頁五：匯入區 (支援連字號題號極速解析)】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
@@ -938,7 +943,7 @@ with tab_import:
 
         engine_type = st.radio(
             "⚙️ 選擇匯入引擎：",
-            ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，永遠不怕被鎖）", "🤖 AI 智慧解析（排版極混亂時使用，需 API 額度）"]
+            ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，永遠不怕被鎖）", "🤖 AI 智慧解析（需 API 額度）"]
         )
 
         import_mode = st.radio("資料來源：", ["📁 檔案上傳 (PDF, Word, PPT)", "📋 純文字直接貼上"])
@@ -972,7 +977,7 @@ with tab_import:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
                                     c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                              (target_folder, final_name, nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], ""))
+                                              (target_folder, final_name, nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], nq['explanation']))
                                 conn.commit()
                                 st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！（完全不耗 API 額度）")
                                 time.sleep(1)
@@ -1009,9 +1014,9 @@ with tab_import:
                             opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                             opts_json = json.dumps(opts_clean, ensure_ascii=False)
                             c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
-                                      (target_folder, paste_category_name.strip(), nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], ""))
+                                      (target_folder, paste_category_name.strip(), nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], nq['explanation']))
                         conn.commit()
-                        st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！")
+                        st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！（完全不耗 API 額度）")
                         time.sleep(1)
                         st.rerun()
                     else: st.warning("⚠️ 未能辨識題目格式，請確認是否包含題號與 (A)(B)(C)(D) 選項。")
