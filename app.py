@@ -183,17 +183,23 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 單題專用深度剖析器（支援 a.~e. 5選項、【正確答案】、Correct Answer、【中文解析】、無空格黏連）
+def clean_file_artifacts(text):
+    if not text: return ""
+    # 自動清除 PDF + 4, PDF + 1, PDF, JPG, PNG 浮水印標籤
+    cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+# 🌟 單題專用深度剖析器（支援圖一、圖二、圖三、圖四所有格式）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
 
-    # 1. 抓取答案 (Answer)：支援 【正確答案】、o 【正確答案】、Correct Answer、解答、答案
+    # 1. 抓取答案 (Answer)
     ans = ""
     ans_patterns = [
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])\b',
-        r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])(?=[\)）\s\.\、\:]|$)',
-        r'【\s*(?:正確答案|答案|解答|正解)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])'
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?(?=[\s\.\、\:\)]|$)',
+        r'【\s*(?:正確答案|答案|解答|正解)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?'
     ]
     m_ans = None
     for ap in ans_patterns:
@@ -203,30 +209,46 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
-    # 2. 抓取解析 (Explanation)：支援 【中文解析】、o 【中文解析】、中文簡析、解析、說明
+    # 2. 抓取【跨章節】、【跨單元】等標籤 (圖四)
+    tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
+    tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
+
+    # 3. 抓取解析 (Explanation)
     exp = ""
     exp_patterns = [
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明))\s*】\s*[:：\s]*([\s\S]*)$',
-        r'(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*】\s*[:：\s]*([\s\S]*)$',
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
     ]
     m_exp = None
     for ep in exp_patterns:
         m = re.search(ep, b, re.IGNORECASE | re.MULTILINE)
         if m:
-            exp = m.group(1).strip()
+            exp = clean_file_artifacts(m.group(1).strip())
             m_exp = m
             break
 
-    # 3. 截除答案與解析，取得題目本體與選項
-    pos_ans = m_ans.start() if m_ans else len(b)
-    pos_exp = m_exp.start() if m_exp else len(b)
-    earliest_meta = min(pos_ans, pos_exp)
-    q_opts_part = b[:earliest_meta].strip()
+    # 將跨章節標籤與解析合併
+    if tags_text:
+        all_tags = "\n".join(tags_text)
+        exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
-    # 4. 尋找選項 A, B, C, D (及可選的 E)，支援大小寫 a.~e.
+    # 4. 確定題幹與選項的主幹範圍（截除答案、標籤與解析區塊）
+    end_markers = [
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+    ]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
+    pos_end = min(all_end_pos) if all_end_pos else len(b)
+    q_opts_part = b[:pos_end].strip()
+
+    # 5. 尋找選項 A, B, C, D (及可選的 E)，支援同行選項與無空格黏連
     def find_markers(text, letter):
-        # 匹配 (A), A., A), A:, A、, (a), a., a)
-        pat = r'(?:[\(（]' + letter + r'[\)）]|(?:(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])|^|[a-zA-Z\)])' + letter + r'[\)）\.\、\:\：])\s*'
+        pat = (
+            r'[\(（]' + letter + r'[\)）]\s*'  # (A)
+            r'|(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])' + letter + r'[\)）\.\、\:\：]\s*' # 空格/標點 + A. / A)
+            r'|^' + letter + r'[\)）\.\、\:\：]\s*' # 行首 + A.
+            r'|(?<=[a-zA-Z0-9\-\_\)])' + letter + r'[\)）\.\、\:\：]\s*' # 黏連單字尾端
+        )
         return list(re.finditer(pat, text, re.IGNORECASE))
 
     A_matches = find_markers(q_opts_part, 'A')
@@ -259,27 +281,38 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 5. 提取題幹並清理開頭題號（保留【跨單元】等標籤）
+    # 6. 提取題幹並清理題號開頭（圖一~圖四全覆蓋）
     stem = q_opts_part[:chosen_A.start()].strip()
+    # 移除圓點項目符號 o / •
+    stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
+    # 移除「第 XX 題」
+    stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem)
+    # 移除「題目（第 11 頁第 21 題）」
+    stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem)
+    # 移除「題目：」
+    stem = re.sub(r'^題目\s*[:：]\s*', '', stem)
+    # 移除 Question 13 或 22-27. 等一般題號
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*', '', stem).strip()
+    stem = clean_file_artifacts(stem)
 
-    opt_A = q_opts_part[chosen_A.end() : chosen_B.start()].strip()
-    opt_B = q_opts_part[chosen_B.end() : chosen_C.start()].strip()
+    # 7. 提取各選項並清除浮水印標籤
+    opt_A = clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip())
+    opt_B = clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip())
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
 
     if chosen_D:
-        opt_C = q_opts_part[chosen_C.end() : chosen_D.start()].strip()
+        opt_C = clean_file_artifacts(q_opts_part[chosen_C.end() : chosen_D.start()].strip())
         options.append(f"(C) {opt_C}")
         if chosen_E:
-            opt_D = q_opts_part[chosen_D.end() : chosen_E.start()].strip()
-            opt_E = q_opts_part[chosen_E.end():].strip()
+            opt_D = clean_file_artifacts(q_opts_part[chosen_D.end() : chosen_E.start()].strip())
+            opt_E = clean_file_artifacts(q_opts_part[chosen_E.end():].strip())
             options.append(f"(D) {opt_D}")
             options.append(f"(E) {opt_E}")
         else:
-            opt_D = q_opts_part[chosen_D.end():].strip()
+            opt_D = clean_file_artifacts(q_opts_part[chosen_D.end():].strip())
             options.append(f"(D) {opt_D}")
     else:
-        opt_C = q_opts_part[chosen_C.end():].strip()
+        opt_C = clean_file_artifacts(q_opts_part[chosen_C.end():].strip())
         options.append(f"(C) {opt_C}")
 
     if not ans:
@@ -292,7 +325,7 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（精確辨別 3. 【跨單元】、Question 13、22-27. 等，支援長文無換行黏連）
+# 🌟 全文全自動切題引擎（精確辨識圖一、圖二、圖三、圖四等所有題號格式）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
@@ -300,11 +333,21 @@ def parse_questions_locally(raw_text):
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
     # 正則匹配題目起點：
-    # 1. Question 13
-    # 2. 3. 【跨單元】 或 3. What is...
-    # 3. 22-27.
-    # 4. 第 1 題
-    q_start_regex = r'(?:Question|question)\s*\d+|(?<=[\s\n\r。！？；，,\)\]」』])(?:[Qq]\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
+    # 1. 第 XX 題 (圖一、圖四)
+    # 2. 題目（第 XX 頁第 XX 題） (圖二)
+    # 3. o 【M113-6】 或 【M113-6】 (圖三)
+    # 4. Question 13
+    # 5. 3. 【跨單元 或 22-27.
+    q_start_regex = (
+        r'(?:'
+        r'(?:^|\n)\s*第\s*\d+\s*題'
+        r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*\d+\s*題[\)）]'
+        r'|(?:^|\n)\s*(?:[oO○•●\-\*]\s*)?【[A-Za-z0-9\-_]{2,}】'
+        r'|(?:Question|question)\s*\d+'
+        r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
+        r'|(?<=[\s\n\r。！？；，,\)\]」』])(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【)))'
+        r')'
+    )
     splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
@@ -500,7 +543,7 @@ if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs
 if 'exam_start_time' not in st.session_state: st.session_state.exam_start_time = 0.0
 if 'exam_time_limit_sec' not in st.session_state: st.session_state.exam_time_limit_sec = 0
 if 'exam_total_time_str' not in st.session_state: st.session_state.exam_total_time_str = ""
-if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = []
+if 'exam_wrong_ids' not in st.session_state: st.exam_wrong_ids = []
 if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
 if 'exam_lang_mode' not in st.session_state: st.session_state.exam_lang_mode = "en"
 if 'exam_lang_overrides' not in st.session_state: st.session_state.exam_lang_overrides = {}
