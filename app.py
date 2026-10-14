@@ -183,34 +183,50 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 單題專用深度剖析器（支援 Question 13、22-27.、Correct Answer、中文簡析與黏連選項）
+# 🌟 單題專用深度剖析器（支援 a.~e. 5選項、【正確答案】、Correct Answer、【中文解析】、無空格黏連）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
 
-    # 1. 抓取答案 (Answer)：支援 Correct Answer: A)、解答：A、答案：A 等
+    # 1. 抓取答案 (Answer)：支援 【正確答案】、o 【正確答案】、Correct Answer、解答、答案
     ans = ""
-    ans_pattern = r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])(?=[\)）\s\.\、\:]|$)'
-    m_ans = re.search(ans_pattern, b, re.IGNORECASE)
-    if m_ans:
-        ans = m_ans.group(1).upper()
+    ans_patterns = [
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])\b',
+        r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])(?=[\)）\s\.\、\:]|$)',
+        r'【\s*(?:正確答案|答案|解答|正解)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])'
+    ]
+    m_ans = None
+    for ap in ans_patterns:
+        m = re.search(ap, b, re.IGNORECASE | re.MULTILINE)
+        if m:
+            ans = m.group(1).upper()
+            m_ans = m
+            break
 
-    # 2. 抓取解析 (Explanation)：支援 中文簡析、簡析、解析、詳解
+    # 2. 抓取解析 (Explanation)：支援 【中文解析】、o 【中文解析】、中文簡析、解析、說明
     exp = ""
-    exp_pattern = r'(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
-    m_exp = re.search(exp_pattern, b, re.IGNORECASE)
-    if m_exp:
-        exp = m_exp.group(1).strip()
+    exp_patterns = [
+        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明))\s*】\s*[:：\s]*([\s\S]*)$',
+        r'(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
+    ]
+    m_exp = None
+    for ep in exp_patterns:
+        m = re.search(ep, b, re.IGNORECASE | re.MULTILINE)
+        if m:
+            exp = m.group(1).strip()
+            m_exp = m
+            break
 
-    # 3. 確定題幹與選項的主幹範圍（截除答案與解析）
+    # 3. 截除答案與解析，取得題目本體與選項
     pos_ans = m_ans.start() if m_ans else len(b)
     pos_exp = m_exp.start() if m_exp else len(b)
     earliest_meta = min(pos_ans, pos_exp)
     q_opts_part = b[:earliest_meta].strip()
 
-    # 4. 尋找選項 A, B, C, D (及可選的 E)
+    # 4. 尋找選項 A, B, C, D (及可選的 E)，支援大小寫 a.~e.
     def find_markers(text, letter):
-        pat = r'(?:[\(（]' + letter + r'[\)）]|' + letter + r'[\)）\.\、\:\：])\s*'
+        # 匹配 (A), A., A), A:, A、, (a), a., a)
+        pat = r'(?:[\(（]' + letter + r'[\)）]|(?:(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])|^|[a-zA-Z\)])' + letter + r'[\)）\.\、\:\：])\s*'
         return list(re.finditer(pat, text, re.IGNORECASE))
 
     A_matches = find_markers(q_opts_part, 'A')
@@ -243,9 +259,9 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 5. 提取題幹並清理題號
+    # 5. 提取題幹並清理開頭題號（保留【跨單元】等標籤）
     stem = q_opts_part[:chosen_A.start()].strip()
-    stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]?|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]]\s*)[\s\.\、\:\–\-]*', '', stem).strip()
+    stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*', '', stem).strip()
 
     opt_A = q_opts_part[chosen_A.end() : chosen_B.start()].strip()
     opt_B = q_opts_part[chosen_B.end() : chosen_C.start()].strip()
@@ -276,15 +292,19 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（精確辨別 Question 13、22-27. 等，支援長文無換行黏連）
+# 🌟 全文全自動切題引擎（精確辨別 3. 【跨單元】、Question 13、22-27. 等，支援長文無換行黏連）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配題目起點：Question 13 / 22-27. / 1. / 第1題 等
-    q_start_regex = r'(?:Question|question)\s*\d+|(?<=[\s\n\r。！？；，,\)\]])(?:[Qq]\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
+    # 正則匹配題目起點：
+    # 1. Question 13
+    # 2. 3. 【跨單元】 或 3. What is...
+    # 3. 22-27.
+    # 4. 第 1 題
+    q_start_regex = r'(?:Question|question)\s*\d+|(?<=[\s\n\r。！？；，,\)\]」』])(?:[Qq]\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
     splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
