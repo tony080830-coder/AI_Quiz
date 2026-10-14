@@ -183,7 +183,7 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 單題專用深度剖析器（專解 Question 13、Correct Answer、中文簡析、無空格黏連）
+# 🌟 單題專用深度剖析器（支援 Question 13、22-27.、Correct Answer、中文簡析與黏連選項）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -202,7 +202,7 @@ def parse_single_question_block(b):
     if m_exp:
         exp = m_exp.group(1).strip()
 
-    # 3. 確定題目與選項的主幹範圍 (切掉後續的答案與解析)
+    # 3. 確定題幹與選項的主幹範圍（截除答案與解析）
     pos_ans = m_ans.start() if m_ans else len(b)
     pos_exp = m_exp.start() if m_exp else len(b)
     earliest_meta = min(pos_ans, pos_exp)
@@ -245,7 +245,6 @@ def parse_single_question_block(b):
 
     # 5. 提取題幹並清理題號
     stem = q_opts_part[:chosen_A.start()].strip()
-    # 支援 Question 13、Question 15、22-27.、1. 等開頭清理
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]?|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]]\s*)[\s\.\、\:\–\-]*', '', stem).strip()
 
     opt_A = q_opts_part[chosen_A.end() : chosen_B.start()].strip()
@@ -285,7 +284,7 @@ def parse_questions_locally(raw_text):
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
     # 正則匹配題目起點：Question 13 / 22-27. / 1. / 第1題 等
-    q_start_regex = r'(?:(?<=[\s\n\r。！？；，,])|^)\s*(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
+    q_start_regex = r'(?:Question|question)\s*\d+|(?<=[\s\n\r。！？；，,\)\]])(?:[Qq]\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])'
     splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
@@ -528,6 +527,9 @@ with tab_practice:
         folders = get_all_folders()
         if not folders: 
             st.warning("題庫空空如也，請先到「📥 匯入題庫」上傳考卷或講義！")
+            if st.button("🔄 重新整理 / 喚醒雲端資料庫", use_container_width=True, key="wake_p"):
+                get_db_connection.clear()
+                st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
             with col_f: selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="p_fold")
@@ -698,7 +700,11 @@ with tab_test:
     elif not st.session_state.exam_active and not st.session_state.exam_finished:
         st.markdown("### 📝 模擬測驗模式（全卷作答，最後統一給分結算）")
         folders = get_all_folders()
-        if not folders: st.warning("請先匯入考卷！")
+        if not folders: 
+            st.warning("請先匯入考卷！")
+            if st.button("🔄 重新整理 / 喚醒雲端資料庫", use_container_width=True, key="wake_t"):
+                get_db_connection.clear()
+                st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
             with col_f: selected_folder = st.selectbox("📁 篩選資料夾：", ["全部資料夾"] + folders, key="t_fold")
