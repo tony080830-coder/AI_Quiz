@@ -183,13 +183,23 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
+# 🌟 選項顯示自動去重器（徹底消除 (A) (A) 重複現象）
+def format_clean_option(opt_text, opt_idx=0):
+    raw = str(opt_text).strip()
+    # 清理重複出現的前綴，例如 (A) (A) 或 (A) A. 等
+    cleaned = re.sub(r'^\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:\s]+\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:\s]+', lambda m: f"({m.group(0).strip()[1].upper()}) ", raw)
+    if not re.match(r'^\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:]', cleaned):
+        letter = chr(65 + opt_idx) if opt_idx < 26 else str(opt_idx + 1)
+        cleaned = f"({letter}) {cleaned}"
+    return cleaned
+
 def clean_file_artifacts(text):
     if not text: return ""
-    # 自動清除 PDF + 4, PDF + 1, PDF, JPG, PNG 浮水印標籤
+    # 清除複製產生的 PDF + 4, PDF + 1, PDF, JPG, PNG 浮水印標籤
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援圖一、圖二、圖三、圖四所有格式）
+# 🌟 單題專用深度剖析器（支援大小寫 A~E、Correct Answer、跨單元標記等）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -209,7 +219,7 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
-    # 2. 抓取【跨章節】、【跨單元】等標籤 (圖四)
+    # 2. 抓取【跨章節】、【跨單元】等補充標籤
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
@@ -227,12 +237,11 @@ def parse_single_question_block(b):
             m_exp = m
             break
 
-    # 將跨章節標籤與解析合併
     if tags_text:
         all_tags = "\n".join(tags_text)
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
-    # 4. 確定題幹與選項的主幹範圍（截除答案、標籤與解析區塊）
+    # 4. 截除答案、標籤與解析區塊，保留題幹與選項主體
     end_markers = [
         r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
         r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
@@ -241,13 +250,13 @@ def parse_single_question_block(b):
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
-    # 5. 尋找選項 A, B, C, D (及可選的 E)，支援同行選項與無空格黏連
+    # 5. 精準搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
             r'[\(（]' + letter + r'[\)）]\s*'  # (A)
-            r'|(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])' + letter + r'[\)）\.\、\:\：]\s*' # 空格/標點 + A. / A)
-            r'|^' + letter + r'[\)）\.\、\:\：]\s*' # 行首 + A.
-            r'|(?<=[a-zA-Z0-9\-\_\)])' + letter + r'[\)）\.\、\:\：]\s*' # 黏連單字尾端
+            r'|(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])' + letter + r'[\)）\.\、\:\：]\s*'
+            r'|^' + letter + r'[\)）\.\、\:\：]\s*'
+            r'|(?<=[a-zA-Z0-9\-\_\)])' + letter + r'[\)）\.\、\:\：]\s*'
         )
         return list(re.finditer(pat, text, re.IGNORECASE))
 
@@ -281,21 +290,16 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹並清理題號開頭（圖一~圖四全覆蓋）
+    # 6. 提取題幹並清理題首編號（保留跨單元內容，絕不誤刪）
     stem = q_opts_part[:chosen_A.start()].strip()
-    # 移除圓點項目符號 o / •
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
-    # 移除「第 XX 題」
     stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem)
-    # 移除「題目（第 11 頁第 21 題）」
     stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem)
-    # 移除「題目：」
     stem = re.sub(r'^題目\s*[:：]\s*', '', stem)
-    # 移除 Question 13 或 22-27. 等一般題號
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
-    # 7. 提取各選項並清除浮水印標籤
+    # 7. 提取各選項（存入乾淨內容）
     opt_A = clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip())
     opt_B = clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip())
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
@@ -325,27 +329,24 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（精確辨識圖一、圖二、圖三、圖四等所有題號格式）
+# 🌟 全文全自動切題引擎（嚴格題號分界，杜絕題幹中間逗號誤切）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配題目起點：
-    # 1. 第 XX 題 (圖一、圖四)
-    # 2. 題目（第 XX 頁第 XX 題） (圖二)
-    # 3. o 【M113-6】 或 【M113-6】 (圖三)
-    # 4. Question 13
-    # 5. 3. 【跨單元 或 22-27.
+    # 正則匹配真實題目起點：
+    # 嚴格限制在新行開頭，或明確句末符號後接題號，避免逗號後的 (跨單元 10, 12) 被當成新題目
     q_start_regex = (
         r'(?:'
         r'(?:^|\n)\s*第\s*\d+\s*題'
         r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*\d+\s*題[\)）]'
+        r'|(?:^|\n)\s*題目\s*[:：]'
         r'|(?:^|\n)\s*(?:[oO○•●\-\*]\s*)?【[A-Za-z0-9\-_]{2,}】'
-        r'|(?:Question|question)\s*\d+'
+        r'|(?:^|\n)\s*(?:Question|question)\s*\d+'
         r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
-        r'|(?<=[\s\n\r。！？；，,\)\]」』])(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【)))'
+        r'|(?<=[\n\r。！？；」』])\s*(?:(?:Question|question)\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_]\d+)\s*[\.\、])'
         r')'
     )
     splits = list(re.finditer(q_start_regex, text))
@@ -543,7 +544,7 @@ if 'exam_tested_pdfs' not in st.session_state: st.session_state.exam_tested_pdfs
 if 'exam_start_time' not in st.session_state: st.session_state.exam_start_time = 0.0
 if 'exam_time_limit_sec' not in st.session_state: st.session_state.exam_time_limit_sec = 0
 if 'exam_total_time_str' not in st.session_state: st.session_state.exam_total_time_str = ""
-if 'exam_wrong_ids' not in st.session_state: st.exam_wrong_ids = []
+if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = []
 if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
 if 'exam_lang_mode' not in st.session_state: st.session_state.exam_lang_mode = "en"
 if 'exam_lang_overrides' not in st.session_state: st.session_state.exam_lang_overrides = {}
@@ -558,6 +559,7 @@ def check_is_correct(chosen_idx, q_item):
     if chosen_str == correct_ans: return True
     opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else ""
     if correct_ans.upper() == opt_letter: return True
+    if len(correct_ans) == 1 and chosen_str.startswith(f"({correct_ans})"): return True
     if len(correct_ans) == 1 and chosen_str.startswith(correct_ans): return True
     if len(chosen_str) == 1 and correct_ans.startswith(chosen_str): return True
     return False
@@ -685,7 +687,8 @@ with tab_practice:
         if not st.session_state.practice_answered and current_chosen_idx is None:
             st.write("請選擇你的答案：")
             for opt_idx, opt_text in enumerate(disp_options):
-                if st.button(f"  {opt_text}", key=f"p_opt_{curr_q_id}_{opt_idx}", use_container_width=True):
+                opt_display = format_clean_option(opt_text, opt_idx)
+                if st.button(f"  {opt_display}", key=f"p_opt_{curr_q_id}_{opt_idx}", use_container_width=True):
                     st.session_state.exam_user_answers[curr_q_id] = opt_idx
                     st.session_state.practice_answered = True
                     is_right = check_is_correct(opt_idx, curr_q)
@@ -698,11 +701,12 @@ with tab_practice:
 
             st.markdown("#### 📋 題目選項完整對照：")
             for opt_idx, opt_text in enumerate(disp_options):
+                opt_display = format_clean_option(opt_text, opt_idx)
                 is_this_ans = check_is_correct(opt_idx, curr_q)
                 is_this_user = (current_chosen_idx == opt_idx)
-                if is_this_ans: st.markdown(f"- **:green[✅ {opt_text} （正解）]**")
-                elif is_this_user: st.markdown(f"- **:red[❌ {opt_text} （你的選擇）]**")
-                else: st.markdown(f"- <span style='color: gray;'>{opt_text}</span>", unsafe_allow_html=True)
+                if is_this_ans: st.markdown(f"- **:green[✅ {opt_display} （正解）]**")
+                elif is_this_user: st.markdown(f"- **:red[❌ {opt_display} （你的選擇）]**")
+                else: st.markdown(f"- <span style='color: gray;'>{opt_display}</span>", unsafe_allow_html=True)
 
             st.divider()
             exp = curr_q.get('explanation', '')
@@ -880,8 +884,9 @@ with tab_test:
         current_chosen_idx = st.session_state.exam_user_answers.get(curr_q_id, None)
         st.write("請選擇你的答案：")
         for opt_idx, opt_text in enumerate(disp_options):
+            opt_display = format_clean_option(opt_text, opt_idx)
             is_chosen = (current_chosen_idx == opt_idx)
-            if st.button(f"👉 【已選】{opt_text}" if is_chosen else f"  {opt_text}", type="primary" if is_chosen else "secondary", key=f"t_opt_{curr_q_id}_{opt_idx}", use_container_width=True):
+            if st.button(f"👉 【已選】{opt_display}" if is_chosen else f"  {opt_display}", type="primary" if is_chosen else "secondary", key=f"t_opt_{curr_q_id}_{opt_idx}", use_container_width=True):
                 st.session_state.exam_user_answers[curr_q_id] = opt_idx
                 st.rerun()
 
@@ -951,7 +956,6 @@ with tab_review:
             else:
                 st.write(f"共找到 **{len(questions_to_show)}** 題：")
 
-                # 批次刪除誤傳題目
                 with st.expander("🧹 批次勾選刪除題目（一次刪多題）", expanded=False):
                     q_select_options = {f"ID {q['id']} - {q['text'][:35]}...": q['id'] for q in questions_to_show}
                     selected_q_to_delete = st.multiselect("勾選欲刪除的題目：", list(q_select_options.keys()))
@@ -972,7 +976,8 @@ with tab_review:
                     with st.expander(f"{'⭐ ' if is_st else ''}第 {idx+1} 題 (ID: {q['id']}): {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                         st.markdown(f"**【題目】** {q['text']}")
                         for opt_i, opt_text in enumerate(q_opts):
-                            st.markdown(f"- ({chr(65 + opt_i) if opt_i < 26 else str(opt_i + 1)}) {opt_text}")
+                            # 使用智慧去重顯示，不再重複打印 (A)
+                            st.markdown(f"- {format_clean_option(opt_text, opt_i)}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                         exp_text = q.get('explanation', '') if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
                         st.markdown(f"💡 **解析**：{exp_text}")
