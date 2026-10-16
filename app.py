@@ -195,7 +195,7 @@ def clean_file_artifacts(text):
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援【M108-5】、跨單元、(A)~(E) 與黏連選項）
+# 🌟 單題專用深度剖析器（支援 LaTeX 公式、跨單元、(A)~(E) 與無空格選項）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -214,7 +214,7 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
-    # 2. 抓取【跨章節】、【跨單元】補充標籤
+    # 2. 抓取【跨章節】、【跨單元】等補充標籤
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
@@ -236,7 +236,7 @@ def parse_single_question_block(b):
         all_tags = "\n".join(tags_text)
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
-    # 4. 截除答案、標籤與解析區塊，保留題幹與選項主體
+    # 4. 截除答案與解析，保留題幹與選項主體
     end_markers = [
         r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
         r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
@@ -285,7 +285,7 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹（保留【M108-5】等出處編號，僅移除開頭符號與多餘題號）
+    # 6. 提取題幹（保留化學式與跨單元標註）
     stem = q_opts_part[:chosen_A.start()].strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem)
@@ -324,34 +324,31 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（即使【M108-5】緊貼在【答案】(D) 同一行也能精準切開）
+# 🌟 全文全自動切題引擎（無論有無換行、只有 1 個題號也能精準切開前後題）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配題目起點（即使前面沒有換行也能切開）：
-    # 1. 【M108-5】/ 【M113-6】（非答案、非解析標籤）
-    # 2. 第 XX 題
-    # 3. 題目（第 XX 頁第 XX 題）或 題目：
-    # 4. Question 13
-    # 5. 22-27. 或行首數字題號
+    # 正則匹配所有題號起點（不限換行，只要前方有空格、標點或為行首即可切開）
     q_start_regex = (
         r'(?:'
-        r'(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案)[A-Za-z0-9\-_]{2,}】'
-        r'|(?:^|\n)\s*第\s*\d+\s*題'
-        r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*\d+\s*題[\)）]'
-        r'|(?:^|\n)\s*題目\s*[:：]'
+        r'題目\s*[\(（][^\n\)]*第?\s*\d+\s*題[\)）]'
+        r'|題目\s*[:：]'
+        r'|(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案)[A-Za-z0-9\-_]{2,}】'
         r'|(?:Question|question)\s*\d+'
-        r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
-        r'|(?<=[\n\r。！？；」』])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)\s*[\.\、\:\)])'
+        r'|第\s*\d+\s*題'
+        r'|\b\d+[-_]\d+\s*[\.\、\:\)]'
+        r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+\s*[\.\、\:\)）]'
+        r'|(?<=[\n\r。！？；!?;」』])\s*(?:[Qq]\s*)?\d+\s*[\.\、\:\)）]'
         r')'
     )
     splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
-    if len(splits) >= 2:
+    if splits:
+        # 如果第一個題號前有文字（例如第 1 題開頭沒題號），先切出前半段
         if splits[0].start() > 0:
             pre_block = text[:splits[0].start()].strip()
             if pre_block:
@@ -362,6 +359,7 @@ def parse_questions_locally(raw_text):
             end = splits[i+1].start() if i + 1 < len(splits) else len(text)
             blocks.append(text[start:end].strip())
     else:
+        # 完全無題號時依雙換行分割
         blocks = [b.strip() for b in text.split('\n\n') if len(b.strip()) > 10]
         if not blocks:
             blocks = [text.strip()]
