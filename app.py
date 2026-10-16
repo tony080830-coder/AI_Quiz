@@ -186,20 +186,16 @@ def is_primarily_english(text):
 # 🌟 選項顯示自動去重器（徹底消除 (A) (A) 重複現象）
 def format_clean_option(opt_text, opt_idx=0):
     raw = str(opt_text).strip()
-    # 清理重複出現的前綴，例如 (A) (A) 或 (A) A. 等
-    cleaned = re.sub(r'^\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:\s]+\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:\s]+', lambda m: f"({m.group(0).strip()[1].upper()}) ", raw)
-    if not re.match(r'^\s*[\(（]?[A-Ea-e1-5][\)）\.\、\:]', cleaned):
-        letter = chr(65 + opt_idx) if opt_idx < 26 else str(opt_idx + 1)
-        cleaned = f"({letter}) {cleaned}"
-    return cleaned
+    clean_content = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw).strip()
+    letter = chr(65 + opt_idx) if opt_idx < 26 else str(opt_idx + 1)
+    return f"({letter}) {clean_content}"
 
 def clean_file_artifacts(text):
     if not text: return ""
-    # 清除複製產生的 PDF + 4, PDF + 1, PDF, JPG, PNG 浮水印標籤
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援大小寫 A~E、Correct Answer、跨單元標記等）
+# 🌟 單題專用深度剖析器（支援【M108-5】、跨單元、(A)~(E) 與黏連選項）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -207,31 +203,30 @@ def parse_single_question_block(b):
     # 1. 抓取答案 (Answer)
     ans = ""
     ans_patterns = [
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?(?=[\s\.\、\:\)]|$)',
-        r'【\s*(?:正確答案|答案|解答|正解)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?'
+        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
+        r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?(?=[\s\.\、\:\)]|$)'
     ]
     m_ans = None
     for ap in ans_patterns:
-        m = re.search(ap, b, re.IGNORECASE | re.MULTILINE)
+        m = re.search(ap, b, re.IGNORECASE)
         if m:
             ans = m.group(1).upper()
             m_ans = m
             break
 
-    # 2. 抓取【跨章節】、【跨單元】等補充標籤
+    # 2. 抓取【跨章節】、【跨單元】補充標籤
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
     # 3. 抓取解析 (Explanation)
     exp = ""
     exp_patterns = [
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*】\s*[:：\s]*([\s\S]*)$',
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
+        r'【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*】\s*[:：\s]*([\s\S]*)$',
+        r'(?:(?:中文)?(?:簡析|解析|詳解|說明)|Explanation)\s*[:：\s]*([\s\S]*)$'
     ]
     m_exp = None
     for ep in exp_patterns:
-        m = re.search(ep, b, re.IGNORECASE | re.MULTILINE)
+        m = re.search(ep, b, re.IGNORECASE)
         if m:
             exp = clean_file_artifacts(m.group(1).strip())
             m_exp = m
@@ -243,17 +238,17 @@ def parse_single_question_block(b):
 
     # 4. 截除答案、標籤與解析區塊，保留題幹與選項主體
     end_markers = [
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
-    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
     # 5. 精準搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
-            r'[\(（]' + letter + r'[\)）]\s*'  # (A)
+            r'[\(（]' + letter + r'[\)）]\s*'
             r'|(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])' + letter + r'[\)）\.\、\:\：]\s*'
             r'|^' + letter + r'[\)）\.\、\:\：]\s*'
             r'|(?<=[a-zA-Z0-9\-\_\)])' + letter + r'[\)）\.\、\:\：]\s*'
@@ -290,16 +285,16 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹並清理題首編號（保留跨單元內容，絕不誤刪）
+    # 6. 提取題幹（保留【M108-5】等出處編號，僅移除開頭符號與多餘題號）
     stem = q_opts_part[:chosen_A.start()].strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem)
     stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem)
     stem = re.sub(r'^題目\s*[:：]\s*', '', stem)
-    stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|第\s*\d+\s*題|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*', '', stem).strip()
+    stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
-    # 7. 提取各選項（存入乾淨內容）
+    # 7. 提取各選項
     opt_A = clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip())
     opt_B = clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip())
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
@@ -329,24 +324,28 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（嚴格題號分界，杜絕題幹中間逗號誤切）
+# 🌟 全文全自動切題引擎（即使【M108-5】緊貼在【答案】(D) 同一行也能精準切開）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配真實題目起點：
-    # 嚴格限制在新行開頭，或明確句末符號後接題號，避免逗號後的 (跨單元 10, 12) 被當成新題目
+    # 正則匹配題目起點（即使前面沒有換行也能切開）：
+    # 1. 【M108-5】/ 【M113-6】（非答案、非解析標籤）
+    # 2. 第 XX 題
+    # 3. 題目（第 XX 頁第 XX 題）或 題目：
+    # 4. Question 13
+    # 5. 22-27. 或行首數字題號
     q_start_regex = (
         r'(?:'
-        r'(?:^|\n)\s*第\s*\d+\s*題'
+        r'(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案)[A-Za-z0-9\-_]{2,}】'
+        r'|(?:^|\n)\s*第\s*\d+\s*題'
         r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*\d+\s*題[\)）]'
         r'|(?:^|\n)\s*題目\s*[:：]'
-        r'|(?:^|\n)\s*(?:[oO○•●\-\*]\s*)?【[A-Za-z0-9\-_]{2,}】'
-        r'|(?:^|\n)\s*(?:Question|question)\s*\d+'
+        r'|(?:Question|question)\s*\d+'
         r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
-        r'|(?<=[\n\r。！？；」』])\s*(?:(?:Question|question)\s*\d+|第\s*\d+\s*題|\b\d+(?:[-_]\d+)\s*[\.\、])'
+        r'|(?<=[\n\r。！？；」』])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)\s*[\.\、\:\)])'
         r')'
     )
     splits = list(re.finditer(q_start_regex, text))
@@ -555,13 +554,13 @@ if 'ai_generated_temp' not in st.session_state: st.session_state.ai_generated_te
 def check_is_correct(chosen_idx, q_item):
     orig_opts = get_question_options(q_item)
     if chosen_idx is None or chosen_idx < 0 or chosen_idx >= len(orig_opts): return False
-    chosen_str, correct_ans = orig_opts[chosen_idx].strip(), str(q_item['answer']).strip()
-    if chosen_str == correct_ans: return True
+    chosen_str, correct_ans = orig_opts[chosen_idx].strip(), str(q_item['answer']).strip().upper()
     opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else ""
-    if correct_ans.upper() == opt_letter: return True
-    if len(correct_ans) == 1 and chosen_str.startswith(f"({correct_ans})"): return True
-    if len(correct_ans) == 1 and chosen_str.startswith(correct_ans): return True
-    if len(chosen_str) == 1 and correct_ans.startswith(chosen_str): return True
+    if correct_ans == opt_letter: return True
+    if correct_ans in [f"({opt_letter})", f"{opt_letter}.", f"{opt_letter})"]: return True
+    if chosen_str.startswith(f"({correct_ans})") or chosen_str.startswith(f"{correct_ans}."): return True
+    clean_choice = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', chosen_str).strip()
+    if clean_choice and (clean_choice == correct_ans or correct_ans in clean_choice): return True
     return False
 
 def flush_pending_updates():
@@ -976,7 +975,6 @@ with tab_review:
                     with st.expander(f"{'⭐ ' if is_st else ''}第 {idx+1} 題 (ID: {q['id']}): {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                         st.markdown(f"**【題目】** {q['text']}")
                         for opt_i, opt_text in enumerate(q_opts):
-                            # 使用智慧去重顯示，不再重複打印 (A)
                             st.markdown(f"- {format_clean_option(opt_text, opt_i)}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                         exp_text = q.get('explanation', '') if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
