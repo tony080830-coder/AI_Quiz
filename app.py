@@ -183,7 +183,7 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 選項顯示自動去重器（徹底消除 (A) (A) 重複現象）
+# 🌟 選項顯示去重器（徹底根除 (A) (A) 重複現象）
 def format_clean_option(opt_text, opt_idx=0):
     raw = str(opt_text).strip()
     clean_content = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw).strip()
@@ -195,7 +195,7 @@ def clean_file_artifacts(text):
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援 LaTeX 公式、跨單元、(A)~(E) 與無空格選項）
+# 🌟 單題專用深度剖析器（支援第 5 題、題目：、(A)~(E) 與 o 【解答】）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -214,7 +214,7 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
-    # 2. 抓取【跨章節】、【跨單元】等補充標籤
+    # 2. 抓取【跨章節】、【跨單元】補充標籤
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
@@ -229,6 +229,8 @@ def parse_single_question_block(b):
         m = re.search(ep, b, re.IGNORECASE)
         if m:
             exp = clean_file_artifacts(m.group(1).strip())
+            # 剃除末端可能夾帶的下一章標題
+            exp = re.sub(r'(?:\n\s*)*第\s*\d+\s*章[^\n]*$', '', exp).strip()
             m_exp = m
             break
 
@@ -238,14 +240,14 @@ def parse_single_question_block(b):
 
     # 4. 截除答案與解析，保留題幹與選項主體
     end_markers = [
-        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'(?:^[ \t]*[oO○•●\-\*]\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:^[ \t]*[oO○•●\-\*]\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
-    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
-    # 5. 精準搜尋選項 A, B, C, D (及可選的 E)
+    # 5. 搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
             r'[\(（]' + letter + r'[\)）]\s*'
@@ -285,33 +287,34 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹（保留化學式與跨單元標註）
+    # 6. 提取題幹（乾淨剃除「第 10 章...」、「第 5 題」、「題目：」等標頭）
     stem = q_opts_part[:chosen_A.start()].strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
-    stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem)
-    stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem)
-    stem = re.sub(r'^題目\s*[:：]\s*', '', stem)
+    stem = re.sub(r'^第\s*\d+\s*章[^\n]*\n*', '', stem).strip()
+    stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem).strip()
+    stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem).strip()
+    stem = re.sub(r'^題目\s*[:：]\s*', '', stem).strip()
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
-    # 7. 提取各選項
-    opt_A = clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip())
-    opt_B = clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip())
+    # 7. 提取各選項並清除末端多餘項目符號
+    opt_A = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
+    opt_B = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
 
     if chosen_D:
-        opt_C = clean_file_artifacts(q_opts_part[chosen_C.end() : chosen_D.start()].strip())
+        opt_C = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end() : chosen_D.start()].strip()))
         options.append(f"(C) {opt_C}")
         if chosen_E:
-            opt_D = clean_file_artifacts(q_opts_part[chosen_D.end() : chosen_E.start()].strip())
-            opt_E = clean_file_artifacts(q_opts_part[chosen_E.end():].strip())
+            opt_D = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end() : chosen_E.start()].strip()))
+            opt_E = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_E.end():].strip()))
             options.append(f"(D) {opt_D}")
             options.append(f"(E) {opt_E}")
         else:
-            opt_D = clean_file_artifacts(q_opts_part[chosen_D.end():].strip())
+            opt_D = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end():].strip()))
             options.append(f"(D) {opt_D}")
     else:
-        opt_C = clean_file_artifacts(q_opts_part[chosen_C.end():].strip())
+        opt_C = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end():].strip()))
         options.append(f"(C) {opt_C}")
 
     if not ans:
@@ -324,31 +327,29 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（無論有無換行、只有 1 個題號也能精準切開前後題）
+# 🌟 全文全自動切題引擎（將「第 X 題 + 題目：」合一判定，杜絕斷頭截碎）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配所有題號起點（不限換行，只要前方有空格、標點或為行首即可切開）
+    # 正則匹配題目起點（將「第 X 題」與緊隨其後的「題目：」視為同一起點）：
     q_start_regex = (
         r'(?:'
-        r'題目\s*[\(（][^\n\)]*第?\s*\d+\s*題[\)）]'
-        r'|題目\s*[:：]'
+        r'(?:^|\n)\s*第\s*\d+\s*題(?:\s*\n\s*題目\s*[:：])?'
+        r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*第?\s*\d+\s*題[\)）]'
+        r'|(?:^|\n)\s*題目\s*[:：]'
         r'|(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案)[A-Za-z0-9\-_]{2,}】'
         r'|(?:Question|question)\s*\d+'
-        r'|第\s*\d+\s*題'
-        r'|\b\d+[-_]\d+\s*[\.\、\:\)]'
-        r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+\s*[\.\、\:\)）]'
-        r'|(?<=[\n\r。！？；!?;」』])\s*(?:[Qq]\s*)?\d+\s*[\.\、\:\)）]'
+        r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
+        r'|(?<=[\n\r。！？；!?;」』\)])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)\s*[\.\、\:\)])'
         r')'
     )
     splits = list(re.finditer(q_start_regex, text))
 
     blocks = []
     if splits:
-        # 如果第一個題號前有文字（例如第 1 題開頭沒題號），先切出前半段
         if splits[0].start() > 0:
             pre_block = text[:splits[0].start()].strip()
             if pre_block:
@@ -359,7 +360,6 @@ def parse_questions_locally(raw_text):
             end = splits[i+1].start() if i + 1 < len(splits) else len(text)
             blocks.append(text[start:end].strip())
     else:
-        # 完全無題號時依雙換行分割
         blocks = [b.strip() for b in text.split('\n\n') if len(b.strip()) > 10]
         if not blocks:
             blocks = [text.strip()]
