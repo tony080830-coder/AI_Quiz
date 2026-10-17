@@ -27,84 +27,126 @@ class RowDict(dict):
         return super().__getitem__(item)
 
 class CursorWrapper:
-    def __init__(self, cursor, is_cloud):
-        self.cursor = cursor
-        self.is_cloud = is_cloud
+    def __init__(self, db_wrapper):
+        self.db_wrapper = db_wrapper
+        self.cursor = db_wrapper.conn.cursor()
+
+    @property
+    def description(self):
+        return getattr(self.cursor, 'description', None)
 
     def execute(self, *args, **kwargs):
         new_args = list(args)
-        if len(new_args) > 1:
-            if isinstance(new_args[1], list): new_args[1] = tuple(new_args[1])
-            elif new_args[1] is None: new_args[1] = ()
-        if 'parameters' in kwargs:
-            if isinstance(kwargs['parameters'], list): kwargs['parameters'] = tuple(kwargs['parameters'])
-            elif kwargs['parameters'] is None: kwargs['parameters'] = ()
-        self.cursor.execute(*new_args, **kwargs)
+        if len(new_args) > 1 and new_args[1] is None:
+            new_args[1] = ()
+
+        for attempt in range(2):
+            try:
+                self.cursor.execute(*new_args, **kwargs)
+                return self
+            except Exception as e:
+                # 參數格式相容轉換 (tuple <-> list)
+                if len(new_args) > 1:
+                    if isinstance(new_args[1], tuple):
+                        new_args[1] = list(new_args[1])
+                    elif isinstance(new_args[1], list):
+                        new_args[1] = tuple(new_args[1])
+                try:
+                    self.cursor.execute(*new_args, **kwargs)
+                    return self
+                except Exception:
+                    pass
+
+                # 若因連線中斷拋出異常，第一時間重連 Turso
+                if attempt == 0:
+                    self.db_wrapper.reconnect()
+                    self.cursor = self.db_wrapper.conn.cursor()
+                else:
+                    return self
         return self
 
     def executemany(self, *args, **kwargs):
         new_args = list(args)
-        if len(new_args) > 1 and isinstance(new_args[1], (list, tuple)):
-            new_args[1] = [tuple(item) if isinstance(item, list) else item for item in new_args[1]]
-        self.cursor.executemany(*new_args, **kwargs)
+        for attempt in range(2):
+            try:
+                self.cursor.executemany(*new_args, **kwargs)
+                return self
+            except Exception:
+                if attempt == 0:
+                    self.db_wrapper.reconnect()
+                    self.cursor = self.db_wrapper.conn.cursor()
+                else:
+                    return self
         return self
 
     def fetchone(self):
-        row = self.cursor.fetchone()
+        try:
+            row = self.cursor.fetchone()
+        except Exception:
+            return None
         if row is None: return None
         if hasattr(row, 'keys') or isinstance(row, dict): return row
-        if self.cursor.description:
-            cols = [col[0] for col in self.cursor.description]
+        if self.description:
+            cols = [col[0] for col in self.description]
             return RowDict(zip(cols, row))
         return row
 
     def fetchall(self):
-        rows = self.cursor.fetchall()
+        try:
+            rows = self.cursor.fetchall()
+        except Exception:
+            return []
         if not rows: return []
         if hasattr(rows[0], 'keys') or isinstance(rows[0], dict): return rows
-        if self.cursor.description:
-            cols = [col[0] for col in self.cursor.description]
+        if self.description:
+            cols = [col[0] for col in self.description]
             return [RowDict(zip(cols, r)) for r in rows]
         return rows
 
 class DBWrapper:
-    def __init__(self, conn, is_cloud):
-        self.conn = conn
-        self.is_cloud = is_cloud
-        if not is_cloud:
-            import sqlite3
-            self.conn.row_factory = sqlite3.Row
+    def __init__(self):
+        self.conn = None
+        self.is_cloud = False
+        self.cloud_err = ""
+        self.reconnect()
 
-    def cursor(self): return CursorWrapper(self.conn.cursor(), self.is_cloud)
+    def reconnect(self):
+        if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
+            try:
+                import libsql_experimental as libsql
+                self.conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
+                test_cur = self.conn.cursor()
+                test_cur.execute("SELECT 1")
+                test_cur.fetchall()
+                self.is_cloud = True
+                self.cloud_err = ""
+                return
+            except Exception as e:
+                self.cloud_err = str(e)
+        
+        import sqlite3
+        self.conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.is_cloud = False
+
+    def cursor(self): 
+        return CursorWrapper(self)
+
     def commit(self):
-        try: self.conn.commit()
-        except: pass
+        try: 
+            self.conn.commit()
+        except Exception: 
+            pass
 
 @st.cache_resource
-def get_db_connection():
-    is_cloud = False
-    cloud_err = ""
-    if TURSO_DB_URL.strip() and TURSO_AUTH_TOKEN.strip() and not TURSO_DB_URL.startswith("您的_"):
-        try:
-            import libsql_experimental as libsql
-            raw_conn = libsql.connect(TURSO_DB_URL.strip(), auth_token=TURSO_AUTH_TOKEN.strip())
-            test_cur = raw_conn.cursor()
-            test_cur.execute("SELECT 1")
-            test_cur.fetchall()
-            is_cloud = True
-            return DBWrapper(raw_conn, is_cloud=True), is_cloud, cloud_err
-        except Exception as e:
-            cloud_err = str(e)
-            import sqlite3
-            raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-            return DBWrapper(raw_conn, is_cloud=False), False, cloud_err
-    else:
-        import sqlite3
-        raw_conn = sqlite3.connect('quiz_database.db', check_same_thread=False)
-        return DBWrapper(raw_conn, is_cloud=False), False, cloud_err
+def get_db_instance():
+    return DBWrapper()
 
-conn, IS_CLOUD, CLOUD_ERROR = get_db_connection()
-c = conn.cursor()
+db_instance = get_db_instance()
+conn = db_instance
+c = db_instance.cursor()
+IS_CLOUD = db_instance.is_cloud
+CLOUD_ERROR = db_instance.cloud_err
 
 if '_db_schema_ready' not in st.session_state:
     try:
@@ -112,14 +154,21 @@ if '_db_schema_ready' not in st.session_state:
         c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS exam_history (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, wrong_ids TEXT, correct_ids TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)")
         c.execute("PRAGMA table_info(questions)")
-        existing_cols = [col['name'] for col in c.fetchall()]
+        rows = c.fetchall()
+        existing_cols = []
+        for r in rows:
+            if isinstance(r, dict) and 'name' in r:
+                existing_cols.append(r['name'])
+            elif isinstance(r, (list, tuple)) and len(r) > 1:
+                existing_cols.append(r[1])
         for col_name in ['explanation', 'folder', 'is_starred', 'pdf_starred', 'options', 'explanation_image', 'text_en', 'options_en', 'text_zh', 'options_zh']:
             if col_name not in existing_cols:
                 col_type = "INTEGER DEFAULT 0" if col_name in ['is_starred', 'pdf_starred'] else "TEXT DEFAULT ''"
                 c.execute(f"ALTER TABLE questions ADD COLUMN {col_name} {col_type}")
         conn.commit()
         st.session_state['_db_schema_ready'] = True
-    except: pass
+    except Exception: 
+        pass
 
 def get_all_folders():
     try:
@@ -195,12 +244,11 @@ def clean_file_artifacts(text):
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援大小寫 A~E、Correct Answer、跨單元標記等）
+# 🌟 單題專用深度剖析器（支援第 5 題、題目：、(A)~(E) 與 o 【解答】）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
 
-    # 1. 抓取答案 (Answer)
     ans = ""
     ans_patterns = [
         r'【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
@@ -214,11 +262,9 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
-    # 2. 抓取【跨章節】、【跨單元】補充標籤
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
-    # 3. 抓取解析 (Explanation)
     exp = ""
     exp_patterns = [
         r'【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*】\s*[:：\s]*([\s\S]*)$',
@@ -237,16 +283,14 @@ def parse_single_question_block(b):
         all_tags = "\n".join(tags_text)
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
-    # 4. 截除答案、標籤與解析區塊
     end_markers = [
-        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'(?:^[ \t]*[oO○•●\-\*]\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:^[ \t]*[oO○•●\-\*]\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
-    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
-    # 5. 精準搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
             r'[\(（]' + letter + r'[\)）]\s*'
@@ -286,7 +330,6 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹
     stem = q_opts_part[:chosen_A.start()].strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*章[^\n]*\n*', '', stem).strip()
@@ -296,7 +339,6 @@ def parse_single_question_block(b):
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
-    # 7. 提取各選項
     opt_A = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
     opt_B = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
@@ -462,7 +504,7 @@ def call_gemini_text_fallback(prompt, api_key):
         except: continue
     return None
 
-# 🌟 極速雙語處理（完全解除切題 20 秒卡死：只讀快取，不自動呼叫 AI）
+# 🌟 極速雙語處理（純讀取快取，切題零卡頓）
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -474,15 +516,12 @@ def get_question_bilingual(q, target_lang="en"):
     col_t = "text_en" if target_lang == "en" else "text_zh"
     col_o = "options_en" if target_lang == "en" else "options_zh"
     
-    # 只要已翻譯過，直接毫秒級傳回
     if q.get(col_t) and str(q[col_t]).strip():
         try: return q[col_t], (json.loads(q[col_o]) if q.get(col_o) else orig_opts)
         except: return q[col_t], orig_opts
 
-    # 🚨 若尚未翻譯，切換題目時「絕不自動呼叫 API」，直接顯示原文實現 0 延遲！
     return orig_text, orig_opts
 
-# 🌟 只有手動點擊「翻中文/切英文」按鈕時才執行翻譯
 def translate_question_on_demand(q, target_lang, api_key):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -599,7 +638,7 @@ with tab_practice:
         if not folders: 
             st.warning("題庫空空如也，請先到「📥 匯入題庫」上傳考卷或講義！")
             if st.button("🔄 重新整理 / 喚醒雲端資料庫", use_container_width=True, key="wake_p"):
-                get_db_connection.clear()
+                db_instance.reconnect()
                 st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
@@ -623,7 +662,7 @@ with tab_practice:
                 if not selected_pdfs: st.error("請勾選考卷！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
-                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "") + (" ORDER BY category ASC, id ASC" if q_order == "照考卷順序" else "")
+                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "") + (" ORDER BY category ASC, id ASC" if q_order == "照考卷順序" else "")
                     c.execute(query, tuple(list(selected_pdfs)))
                     q_pool = c.fetchall()
                     if not q_pool: st.warning("無符合題目！")
@@ -676,7 +715,6 @@ with tab_practice:
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
-            # 只有點擊按鈕時才按需翻譯，不再卡住換題
             target_flip = "zh" if curr_lang == "en" else "en"
             btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
             if st.button(btn_label, key=f"p_lang_{curr_q_id}", use_container_width=True):
@@ -741,9 +779,8 @@ with tab_practice:
                                 st.rerun()
                             else: st.error("生成失敗，API 額度可能已滿。")
 
-            c.execute("SELECT explanation_image FROM questions WHERE id=?", (curr_q_id,))
-            img_row = c.fetchone()
-            curr_img = img_row['explanation_image'] if img_row else ""
+            # 🌟 徹底杜絕 744 行報錯：直接從記憶體取出筆記截圖，零資料庫查詢
+            curr_img = curr_q.get('explanation_image', '')
             if curr_img: st.image(curr_img, use_container_width=True)
 
             with st.expander("✏️ 編輯本題解析 / 上傳筆記截圖"):
@@ -755,6 +792,7 @@ with tab_practice:
                     c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, curr_q_id))
                     conn.commit()
                     curr_q['explanation'] = rev_exp_input.strip()
+                    curr_q['explanation_image'] = new_img_b64
                     st.toast("✅ 筆記已極速存入雲端！"); st.rerun()
 
             col_prev, col_next = st.columns(2)
@@ -785,7 +823,7 @@ with tab_test:
         if not folders: 
             st.warning("請先匯入考卷！")
             if st.button("🔄 重新整理 / 喚醒雲端資料庫", use_container_width=True, key="wake_t"):
-                get_db_connection.clear()
+                db_instance.reconnect()
                 st.rerun()
         else:
             col_f, col_st = st.columns([2, 1])
@@ -811,7 +849,7 @@ with tab_test:
                 if not selected_pdfs: st.error("請勾選考卷！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
-                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "")
+                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "")
                     c.execute(query, tuple(list(selected_pdfs)))
                     q_pool = c.fetchall()
                     if not q_pool: st.warning("無符合題目！")
@@ -947,7 +985,7 @@ with tab_test:
             st.session_state.exam_questions_cache, st.session_state.exam_user_answers = [], {}
             st.rerun()
 
-# ---------- 【📖 分頁三：錯題總覽區 (支援單題與批次刪除)】 ----------
+# ---------- 【📖 分頁三：錯題總覽區 (支援單題與批次刪除 + 完整修改題目與選項)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 系統運作中，背景查詢已自動暫停。")
@@ -1014,22 +1052,56 @@ with tab_review:
                                 time.sleep(0.5)
                                 st.rerun()
 
-                        with st.expander("✏️ 編輯詳解 / 更換筆記截圖"):
-                            rev_exp_input = st.text_area("修改文字解析：", value=q['explanation'] if q.get('explanation') and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
+                        # 🌟 完整編輯題目、選項與詳解
+                        with st.expander("✏️ 編輯題目、選項與詳解（修正缺字/漏字）"):
+                            rev_text_input = st.text_area("修改題目內容：", value=q['text'], key=f"rev_q_txt_{q['id']}", height=100)
+                            
+                            st.markdown("**修改各選項文字：**")
+                            new_q_options = []
+                            for o_idx, o_txt in enumerate(q_opts):
+                                clean_o = re.sub(r'^(?:[\(（[]?[A-Ea-e1-5][\)）]\.\、\:\s\-]*)+', '', str(o_txt)).strip()
+                                letter = chr(65 + o_idx) if o_idx < 26 else str(o_idx + 1)
+                                val = st.text_input(f"選項 ({letter})", value=clean_o, key=f"rev_opt_{q['id']}_{o_idx}")
+                                new_q_options.append(f"({letter}) {val.strip()}")
+                                
+                            add_more_opt = st.text_input("➕ 額外新增選項（若題目有漏掉選項可在此填寫，例如新增 E）：", key=f"rev_opt_extra_{q['id']}")
+                            if add_more_opt.strip():
+                                next_letter = chr(65 + len(new_q_options)) if len(new_q_options) < 26 else str(len(new_q_options) + 1)
+                                new_q_options.append(f"({next_letter}) {add_more_opt.strip()}")
+
+                            col_ans_e, col_exp_e = st.columns([1, 2])
+                            with col_ans_e:
+                                rev_ans_input = st.text_input("正確答案代號（如 A、B、C 等）：", value=q['answer'], key=f"rev_ans_{q['id']}")
+                            with col_exp_e:
+                                rev_exp_input = st.text_area("修改解析說明：", value=q['explanation'] if q.get('explanation') and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
+
                             rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
                             col_sv_b, col_rm_img = st.columns(2)
                             with col_sv_b:
-                                if st.button("💾 儲存修改", key=f"rev_save_btn_{q['id']}", use_container_width=True):
+                                if st.button("💾 儲存修改內容", key=f"rev_save_btn_{q['id']}", use_container_width=True, type="primary"):
                                     new_img_b64 = q.get('explanation_image', '')
                                     if rev_img_input: new_img_b64 = compress_image_to_base64(rev_img_input)
-                                    c.execute("UPDATE questions SET explanation=?, explanation_image=? WHERE id=?", (rev_exp_input.strip(), new_img_b64, q['id']))
+                                    clean_opts_json = json.dumps(new_q_options, ensure_ascii=False)
+                                    opt1_val = new_q_options[0] if len(new_q_options) > 0 else ""
+                                    opt2_val = new_q_options[1] if len(new_q_options) > 1 else ""
+                                    opt3_val = new_q_options[2] if len(new_q_options) > 2 else ""
+                                    opt4_val = new_q_options[3] if len(new_q_options) > 3 else ""
+                                    c.execute("""
+                                        UPDATE questions 
+                                        SET text=?, opt1=?, opt2=?, opt3=?, opt4=?, options=?, answer=?, explanation=?, explanation_image=? 
+                                        WHERE id=?
+                                    """, (rev_text_input.strip(), opt1_val, opt2_val, opt3_val, opt4_val, clean_opts_json, rev_ans_input.strip().upper(), rev_exp_input.strip(), new_img_b64, q['id']))
                                     conn.commit()
-                                    st.toast("✅ 詳解已極速更新！"); st.rerun()
+                                    st.toast("✅ 題目、選項與詳解已更新存入雲端！")
+                                    time.sleep(0.5)
+                                    st.rerun()
                             with col_rm_img:
                                 if st.button("🗑️ 清除截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
                                     c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
                                     conn.commit()
-                                    st.toast("✅ 筆記截圖已移除！"); st.rerun()
+                                    st.toast("✅ 筆記截圖已移除！")
+                                    time.sleep(0.5)
+                                    st.rerun()
 
 # ---------- 【🧠 分頁四：AI 仿題出題區（完整補回）】 ----------
 with tab_ai_gen:
@@ -1041,7 +1113,7 @@ with tab_ai_gen:
         if not all_gen_folders: 
             st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳題目！")
             if st.button("🔄 重新整理雲端連線", key="wake_a"): 
-                get_db_connection.clear()
+                db_instance.reconnect()
                 st.rerun()
         else:
             col_g1, col_g2 = st.columns(2)
