@@ -183,7 +183,7 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 選項顯示去重器（徹底根除 (A) (A) 重複現象）
+# 🌟 選項顯示自動去重器（徹底消除 (A) (A) 重複現象）
 def format_clean_option(opt_text, opt_idx=0):
     raw = str(opt_text).strip()
     clean_content = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw).strip()
@@ -195,7 +195,7 @@ def clean_file_artifacts(text):
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援第 5 題、題目：、(A)~(E) 與 o 【解答】）
+# 🌟 單題專用深度剖析器（支援大小寫 A~E、Correct Answer、跨單元標記等）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -229,7 +229,6 @@ def parse_single_question_block(b):
         m = re.search(ep, b, re.IGNORECASE)
         if m:
             exp = clean_file_artifacts(m.group(1).strip())
-            # 剃除末端可能夾帶的下一章標題
             exp = re.sub(r'(?:\n\s*)*第\s*\d+\s*章[^\n]*$', '', exp).strip()
             m_exp = m
             break
@@ -238,16 +237,16 @@ def parse_single_question_block(b):
         all_tags = "\n".join(tags_text)
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
-    # 4. 截除答案與解析，保留題幹與選項主體
+    # 4. 截除答案、標籤與解析區塊
     end_markers = [
-        r'(?:^[ \t]*[oO○•●\-\*]\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:^[ \t]*[oO○•●\-\*]\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
-    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
-    # 5. 搜尋選項 A, B, C, D (及可選的 E)
+    # 5. 精準搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
             r'[\(（]' + letter + r'[\)）]\s*'
@@ -287,7 +286,7 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
-    # 6. 提取題幹（乾淨剃除「第 10 章...」、「第 5 題」、「題目：」等標頭）
+    # 6. 提取題幹
     stem = q_opts_part[:chosen_A.start()].strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*章[^\n]*\n*', '', stem).strip()
@@ -297,7 +296,7 @@ def parse_single_question_block(b):
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
-    # 7. 提取各選項並清除末端多餘項目符號
+    # 7. 提取各選項
     opt_A = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
     opt_B = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
@@ -327,14 +326,13 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎（將「第 X 題 + 題目：」合一判定，杜絕斷頭截碎）
+# 🌟 全文全自動切題引擎
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # 正則匹配題目起點（將「第 X 題」與緊隨其後的「題目：」視為同一起點）：
     q_start_regex = (
         r'(?:'
         r'(?:^|\n)\s*第\s*\d+\s*題(?:\s*\n\s*題目\s*[:：])?'
@@ -464,6 +462,7 @@ def call_gemini_text_fallback(prompt, api_key):
         except: continue
     return None
 
+# 🌟 極速雙語處理（完全解除切題 20 秒卡死：只讀快取，不自動呼叫 AI）
 def get_question_bilingual(q, target_lang="en"):
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
@@ -474,12 +473,21 @@ def get_question_bilingual(q, target_lang="en"):
 
     col_t = "text_en" if target_lang == "en" else "text_zh"
     col_o = "options_en" if target_lang == "en" else "options_zh"
+    
+    # 只要已翻譯過，直接毫秒級傳回
     if q.get(col_t) and str(q[col_t]).strip():
         try: return q[col_t], (json.loads(q[col_o]) if q.get(col_o) else orig_opts)
         except: return q[col_t], orig_opts
 
-    api_key = get_api_key()
-    if not api_key: return orig_text, orig_opts
+    # 🚨 若尚未翻譯，切換題目時「絕不自動呼叫 API」，直接顯示原文實現 0 延遲！
+    return orig_text, orig_opts
+
+# 🌟 只有手動點擊「翻中文/切英文」按鈕時才執行翻譯
+def translate_question_on_demand(q, target_lang, api_key):
+    orig_text = q.get('text', '')
+    orig_opts = get_question_options(q)
+    col_t = "text_en" if target_lang == "en" else "text_zh"
+    col_o = "options_en" if target_lang == "en" else "options_zh"
 
     try:
         lang_target_desc = "專業醫學英文 (USMLE English)" if target_lang == "en" else "繁體中文（台灣醫學常用術語）"
@@ -492,7 +500,8 @@ def get_question_bilingual(q, target_lang="en"):
         conn.commit()
         q[col_t], q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
         return trans_text, trans_opts
-    except: return orig_text, orig_opts
+    except:
+        return orig_text, orig_opts
 
 def extract_text_from_docx(file_bytes):
     try:
@@ -667,8 +676,17 @@ with tab_practice:
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
-            if st.button("🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文", key=f"p_lang_{curr_q_id}", use_container_width=True):
-                st.session_state.exam_lang_overrides[curr_q_id] = "zh" if curr_lang == "en" else "en"
+            # 只有點擊按鈕時才按需翻譯，不再卡住換題
+            target_flip = "zh" if curr_lang == "en" else "en"
+            btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
+            if st.button(btn_label, key=f"p_lang_{curr_q_id}", use_container_width=True):
+                col_check = "text_zh" if target_flip == "zh" else "text_en"
+                if not (curr_q.get(col_check) and str(curr_q[col_check]).strip()):
+                    api_key = get_api_key()
+                    if api_key:
+                        with st.spinner("AI 正在翻譯此題..."):
+                            translate_question_on_demand(curr_q, target_flip, api_key)
+                st.session_state.exam_lang_overrides[curr_q_id] = target_flip
                 st.rerun()
         with col_s:
             is_q_st = bool(curr_q.get('is_starred', 0))
@@ -866,8 +884,16 @@ with tab_test:
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
         with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
         with col_lang_btn:
-            if st.button("🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文", key=f"t_lang_{curr_q_id}", use_container_width=True):
-                st.session_state.exam_lang_overrides[curr_q_id] = "zh" if curr_lang == "en" else "en"
+            target_flip = "zh" if curr_lang == "en" else "en"
+            btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
+            if st.button(btn_label, key=f"t_lang_{curr_q_id}", use_container_width=True):
+                col_check = "text_zh" if target_flip == "zh" else "text_en"
+                if not (curr_q.get(col_check) and str(curr_q[col_check]).strip()):
+                    api_key = get_api_key()
+                    if api_key:
+                        with st.spinner("AI 正在翻譯此題..."):
+                            translate_question_on_demand(curr_q, target_flip, api_key)
+                st.session_state.exam_lang_overrides[curr_q_id] = target_flip
                 st.rerun()
         with col_s:
             is_q_st = bool(curr_q.get('is_starred', 0))
@@ -1005,10 +1031,79 @@ with tab_review:
                                     conn.commit()
                                     st.toast("✅ 筆記截圖已移除！"); st.rerun()
 
-# ---------- 【🧠 分頁四：AI 仿題出題區】 ----------
+# ---------- 【🧠 分頁四：AI 仿題出題區（完整補回）】 ----------
 with tab_ai_gen:
-    st.markdown("### 🧠 AI 模擬出題")
-    st.info("💡 仿題出題功能需耗費 API 額度。若當前額度耗盡，請至「⚙️ 設定」換上全新 Gmail 申請的 API Key。")
+    if st.session_state.exam_active or st.session_state.exam_finished:
+        st.info("⚡ 刷題進行中，此面板已自動休眠。")
+    else:
+        st.markdown("### 🧠 AI 模擬出題（從特定講義深度仿題）")
+        all_gen_folders = get_all_folders()
+        if not all_gen_folders: 
+            st.info("題庫內目前尚無講義，請先前往「📥 匯入題庫」上傳題目！")
+            if st.button("🔄 重新整理雲端連線", key="wake_a"): 
+                get_db_connection.clear()
+                st.rerun()
+        else:
+            col_g1, col_g2 = st.columns(2)
+            with col_g1: gen_folder = st.selectbox("📂 選擇範本所屬資料夾：", all_gen_folders, key="ai_gen_folder")
+            with col_g2:
+                gen_pdfs, _ = get_categories_by_folder(gen_folder)
+                gen_target_pdf = st.selectbox("📄 選擇模仿範本考卷：", gen_pdfs, key="ai_gen_pdf")
+
+            col_g_n, col_g_diff = st.columns(2)
+            with col_g_n: gen_q_count = st.selectbox("🎯 欲生成的題數：", [3, 5, 8, 10], index=1, format_func=lambda x: f"{x} 題", key="ai_gen_cnt")
+            with col_g_diff: gen_diff = st.selectbox("🎓 題目風格難度：", ["USMLE Step 1 / 全英風格", "國考臨床結合概念題", "基礎生化代謝途徑專題"], key="ai_gen_diff")
+
+            if st.button("✨ 分析講義並生成全新仿題", type="primary", use_container_width=True):
+                api_key = get_api_key()
+                if not api_key: st.error("請至「⚙️ 設定」輸入 Gemini API Key！")
+                elif not gen_target_pdf: st.error("請選取模仿範本！")
+                else:
+                    c.execute("SELECT text, options, answer FROM questions WHERE category=? ORDER BY RANDOM() LIMIT 8", (gen_target_pdf,))
+                    sample_rows = c.fetchall()
+                    if not sample_rows: st.error("範本題目不足！")
+                    else:
+                        sample_context = "\n".join([f"Q: {s['text']} | Opts: {', '.join(get_question_options(s))} | Ans: {s['answer']}" for s in sample_rows])
+                        with st.spinner(f"AI 正在構思並撰寫 {gen_q_count} 道高品質仿題..."):
+                            try:
+                                ai_prompt = (
+                                    f"Analyze these sample questions from '{gen_target_pdf}':\n{sample_context}\n\n"
+                                    f"TASK: Generate {gen_q_count} brand-new multiple-choice questions in English. Style: {gen_diff}.\n"
+                                    "RULES:\n1. Options in English (4 or 5 choices).\n2. Provide correct answer letter.\n"
+                                    "3. Explanation in Traditional Chinese (繁體中文).\n"
+                                    "4. Output STRICT JSON array only:\n"
+                                    '[{"text": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "answer": "A", "explanation": "..."}]'
+                                )
+                                parsed_list, err_msg = call_gemini_guaranteed(ai_prompt, api_key)
+                                if parsed_list:
+                                    st.session_state.ai_generated_temp = parsed_list
+                                    st.toast("🎉 仿題生成完畢！")
+                                else:
+                                    st.error(f"生成失敗：{err_msg}")
+                            except Exception as e: st.error(f"失敗：{e}")
+
+            if st.session_state.ai_generated_temp:
+                st.divider()
+                st.subheader("📋 仿題預覽清單")
+                for g_i, g_q in enumerate(st.session_state.ai_generated_temp, 1):
+                    with st.expander(f"仿題 {g_i}：{g_q.get('text', '')[:40]}...", expanded=True):
+                        st.markdown(f"**【題幹】**：{g_q.get('text', '')}")
+                        for o in g_q.get('options', []): st.markdown(f"- {o}")
+                        st.markdown(f"✅ **正解**：`{g_q.get('answer', '')}`")
+                        st.markdown(f"💡 **解析**：{g_q.get('explanation', '')}")
+                
+                save_cat_name = f"[AI仿題] {gen_target_pdf}"
+                if st.button(f"📥 一鍵加入題庫（儲存至「{save_cat_name}」）", type="primary", use_container_width=True):
+                    for g_item in st.session_state.ai_generated_temp:
+                        opts_clean = [str(x).strip() for x in g_item.get('options', []) if str(x).strip()]
+                        opts_json = json.dumps(opts_clean, ensure_ascii=False)
+                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, text_en, options_en) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)",
+                                  (gen_folder, save_cat_name, g_item.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(g_item.get('answer', '')), g_item.get('explanation', ''), g_item.get('text', ''), opts_json))
+                    conn.commit()
+                    st.session_state.ai_generated_temp = []
+                    st.success("🎉 成功將仿題存入雲端題庫！")
+                    time.sleep(1)
+                    st.rerun()
 
 # ---------- 【📥 分頁五：匯入區 (全面支援極速本地正則引擎)】 ----------
 with tab_import:
