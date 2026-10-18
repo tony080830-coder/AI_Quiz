@@ -44,8 +44,7 @@ class CursorWrapper:
             try:
                 self.cursor.execute(*new_args, **kwargs)
                 return self
-            except Exception as e:
-                # 參數格式相容轉換 (tuple <-> list)
+            except Exception:
                 if len(new_args) > 1:
                     if isinstance(new_args[1], tuple):
                         new_args[1] = list(new_args[1])
@@ -57,7 +56,6 @@ class CursorWrapper:
                 except Exception:
                     pass
 
-                # 若因連線中斷拋出異常，第一時間重連 Turso
                 if attempt == 0:
                     self.db_wrapper.reconnect()
                     self.cursor = self.db_wrapper.conn.cursor()
@@ -244,7 +242,40 @@ def clean_file_artifacts(text):
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 單題專用深度剖析器（支援第 5 題、題目：、(A)~(E) 與 o 【解答】）
+# 🌟 核心修復：嚴格精準比對答案（徹底解決 LDL 包含 D 導致多重正解的致命 Bug）
+def check_is_correct(chosen_idx, q_item):
+    orig_opts = get_question_options(q_item)
+    if chosen_idx is None or chosen_idx < 0 or chosen_idx >= len(orig_opts):
+        return False
+
+    chosen_str = orig_opts[chosen_idx].strip()
+    raw_ans = str(q_item.get('answer', '')).strip()
+
+    # 1. 萃取純字母代號 (支援 A / (A) / A. / A) / 【A】)
+    m_single = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[】\]）\)\.\、\:\s]*$', raw_ans)
+    clean_ans_letter = m_single.group(1).upper() if m_single else ""
+
+    # 當前選擇項目的字母代號
+    opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else str(chosen_idx + 1)
+
+    # 🎯 只要正解是單一字母 (A, B, C, D, E)，只比對選項字母代號，絕對不比對選項內文！
+    if clean_ans_letter:
+        return opt_letter == clean_ans_letter
+
+    # 2. 若正解開頭帶有字母 (例如 "D) LDL receptor ...")
+    m_head = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[\)）\]\.\、\:\s]', raw_ans)
+    if m_head:
+        return opt_letter == m_head.group(1).upper()
+
+    # 3. 只有當正解為完整文字敘述時（且非單字母），才執行文字全等比對
+    clean_choice = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', chosen_str).strip()
+    clean_target = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw_ans).strip()
+    if clean_choice and clean_target and clean_choice.lower() == clean_target.lower():
+        return True
+
+    return False
+
+# 🌟 單題專用深度剖析器
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -597,18 +628,6 @@ if 'practice_answered' not in st.session_state: st.session_state.practice_answer
 if 'pending_db_updates' not in st.session_state: st.session_state.pending_db_updates = {}
 if 'ai_generated_temp' not in st.session_state: st.session_state.ai_generated_temp = []
 
-def check_is_correct(chosen_idx, q_item):
-    orig_opts = get_question_options(q_item)
-    if chosen_idx is None or chosen_idx < 0 or chosen_idx >= len(orig_opts): return False
-    chosen_str, correct_ans = orig_opts[chosen_idx].strip(), str(q_item['answer']).strip().upper()
-    opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else ""
-    if correct_ans == opt_letter: return True
-    if correct_ans in [f"({opt_letter})", f"{opt_letter}.", f"{opt_letter})"]: return True
-    if chosen_str.startswith(f"({correct_ans})") or chosen_str.startswith(f"{correct_ans}."): return True
-    clean_choice = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', chosen_str).strip()
-    if clean_choice and (clean_choice == correct_ans or correct_ans in clean_choice): return True
-    return False
-
 def flush_pending_updates():
     if st.session_state.pending_db_updates:
         for qid, delta in st.session_state.pending_db_updates.items():
@@ -779,7 +798,6 @@ with tab_practice:
                                 st.rerun()
                             else: st.error("生成失敗，API 額度可能已滿。")
 
-            # 🌟 徹底杜絕 744 行報錯：直接從記憶體取出筆記截圖，零資料庫查詢
             curr_img = curr_q.get('explanation_image', '')
             if curr_img: st.image(curr_img, use_container_width=True)
 
@@ -1052,7 +1070,6 @@ with tab_review:
                                 time.sleep(0.5)
                                 st.rerun()
 
-                        # 🌟 完整編輯題目、選項與詳解
                         with st.expander("✏️ 編輯題目、選項與詳解（修正缺字/漏字）"):
                             rev_text_input = st.text_area("修改題目內容：", value=q['text'], key=f"rev_q_txt_{q['id']}", height=100)
                             
@@ -1064,7 +1081,7 @@ with tab_review:
                                 val = st.text_input(f"選項 ({letter})", value=clean_o, key=f"rev_opt_{q['id']}_{o_idx}")
                                 new_q_options.append(f"({letter}) {val.strip()}")
                                 
-                            add_more_opt = st.text_input("➕ 額外新增選項（若題目有漏掉選項可在此填寫，例如新增 E）：", key=f"rev_opt_extra_{q['id']}")
+                            add_more_opt = st.text_input("➕ 額外新增選項（例如新增 E）：", key=f"rev_opt_extra_{q['id']}")
                             if add_more_opt.strip():
                                 next_letter = chr(65 + len(new_q_options)) if len(new_q_options) < 26 else str(len(new_q_options) + 1)
                                 new_q_options.append(f"({next_letter}) {add_more_opt.strip()}")
@@ -1103,7 +1120,7 @@ with tab_review:
                                     time.sleep(0.5)
                                     st.rerun()
 
-# ---------- 【🧠 分頁四：AI 仿題出題區（完整補回）】 ----------
+# ---------- 【🧠 分頁四：AI 仿題出題區】 ----------
 with tab_ai_gen:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
