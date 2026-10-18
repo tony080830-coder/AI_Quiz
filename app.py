@@ -230,10 +230,23 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 選項顯示自動去重器（徹底消除 (A) (A) 重複現象）
+# 🌟 精準標籤剝離器（徹底保護 CTP, CMP, ATP, DNA 等術語不被誤削字首）
+def strip_option_prefix(text):
+    if not text:
+        return ""
+    s = str(text).strip()
+    # 只有具備明確括號、點號、頓號，或者字母後面明確跟隨空白時，才認定為標籤並剝除
+    pattern = r'^\s*(?:[\(（\[]\s*[A-Ea-e1-5]\s*[\)）\]]|[A-Ea-e1-5]\s*[\.\、\:\)\:\–\-]|(?:(?<=\s)|^)[A-Ea-e1-5]\s+)\s*'
+    while True:
+        new_s = re.sub(pattern, '', s, count=1).strip()
+        if new_s == s:
+            break
+        s = new_s
+    return s
+
+# 🌟 選項顯示格式化（保證乾淨單一編號）
 def format_clean_option(opt_text, opt_idx=0):
-    raw = str(opt_text).strip()
-    clean_content = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw).strip()
+    clean_content = strip_option_prefix(opt_text)
     letter = chr(65 + opt_idx) if opt_idx < 26 else str(opt_idx + 1)
     return f"({letter}) {clean_content}"
 
@@ -255,7 +268,6 @@ def check_is_correct(chosen_idx, q_item):
     m_single = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[】\]）\)\.\、\:\s]*$', raw_ans)
     clean_ans_letter = m_single.group(1).upper() if m_single else ""
 
-    # 當前選擇項目的字母代號
     opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else str(chosen_idx + 1)
 
     # 🎯 只要正解是單一字母 (A, B, C, D, E)，只比對選項字母代號，絕對不比對選項內文！
@@ -268,8 +280,8 @@ def check_is_correct(chosen_idx, q_item):
         return opt_letter == m_head.group(1).upper()
 
     # 3. 只有當正解為完整文字敘述時（且非單字母），才執行文字全等比對
-    clean_choice = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', chosen_str).strip()
-    clean_target = re.sub(r'^(?:[\(（\[]?[A-Ea-e1-5][\)）\]\.\、\:\s\-]*)+', '', raw_ans).strip()
+    clean_choice = strip_option_prefix(chosen_str)
+    clean_target = strip_option_prefix(raw_ans)
     if clean_choice and clean_target and clean_choice.lower() == clean_target.lower():
         return True
 
@@ -315,10 +327,10 @@ def parse_single_question_block(b):
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
     end_markers = [
-        r'(?:^[ \t]*[oO○•●\-\*]\s*)?【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:^[ \t]*[oO○•●\-\*]\s*)?(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
-    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b, re.MULTILINE)]
+    all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
@@ -1076,7 +1088,7 @@ with tab_review:
                             st.markdown("**修改各選項文字：**")
                             new_q_options = []
                             for o_idx, o_txt in enumerate(q_opts):
-                                clean_o = re.sub(r'^(?:[\(（[]?[A-Ea-e1-5][\)）]\.\、\:\s\-]*)+', '', str(o_txt)).strip()
+                                clean_o = strip_option_prefix(o_txt)
                                 letter = chr(65 + o_idx) if o_idx < 26 else str(o_idx + 1)
                                 val = st.text_input(f"選項 ({letter})", value=clean_o, key=f"rev_opt_{q['id']}_{o_idx}")
                                 new_q_options.append(f"({letter}) {val.strip()}")
