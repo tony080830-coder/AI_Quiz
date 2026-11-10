@@ -159,7 +159,7 @@ if '_db_schema_ready' not in st.session_state:
                 existing_cols.append(r['name'])
             elif isinstance(r, (list, tuple)) and len(r) > 1:
                 existing_cols.append(r[1])
-        for col_name in ['explanation', 'folder', 'is_starred', 'pdf_starred', 'options', 'explanation_image', 'text_en', 'options_en', 'text_zh', 'options_zh']:
+        for col_name in ['explanation', 'folder', 'is_starred', 'pdf_starred', 'options', 'explanation_image', 'question_image', 'text_en', 'options_en', 'text_zh', 'options_zh']:
             if col_name not in existing_cols:
                 col_type = "INTEGER DEFAULT 0" if col_name in ['is_starred', 'pdf_starred'] else "TEXT DEFAULT ''"
                 c.execute(f"ALTER TABLE questions ADD COLUMN {col_name} {col_type}")
@@ -230,12 +230,11 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 精準標籤剝離器（徹底保護 CTP, CMP, ATP, DNA 等術語不被誤削字首）
+# 🌟 精準標籤剝離器（徹底保護 CTP, CMP, ATP, DNA 等術語不被削字首）
 def strip_option_prefix(text):
     if not text:
         return ""
     s = str(text).strip()
-    # 只有具備明確括號、點號、頓號，或者字母後面明確跟隨空白時，才認定為標籤並剝除
     pattern = r'^\s*(?:[\(（\[]\s*[A-Ea-e1-5]\s*[\)）\]]|[A-Ea-e1-5]\s*[\.\、\:\)\:\–\-]|(?:(?<=\s)|^)[A-Ea-e1-5]\s+)\s*'
     while True:
         new_s = re.sub(pattern, '', s, count=1).strip()
@@ -244,7 +243,6 @@ def strip_option_prefix(text):
         s = new_s
     return s
 
-# 🌟 選項顯示格式化（保證乾淨單一編號）
 def format_clean_option(opt_text, opt_idx=0):
     clean_content = strip_option_prefix(opt_text)
     letter = chr(65 + opt_idx) if opt_idx < 26 else str(opt_idx + 1)
@@ -252,10 +250,10 @@ def format_clean_option(opt_text, opt_idx=0):
 
 def clean_file_artifacts(text):
     if not text: return ""
-    cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG)\b\s*', ' ', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG|Pdf)\b\s*', ' ', text, flags=re.IGNORECASE)
     return cleaned.strip()
 
-# 🌟 核心修復：嚴格精準比對答案（徹底解決 LDL 包含 D 導致多重正解的致命 Bug）
+# 🌟 嚴格精準比對答案（杜絕 LDL 包含 D 導致多重正解）
 def check_is_correct(chosen_idx, q_item):
     orig_opts = get_question_options(q_item)
     if chosen_idx is None or chosen_idx < 0 or chosen_idx >= len(orig_opts):
@@ -264,22 +262,18 @@ def check_is_correct(chosen_idx, q_item):
     chosen_str = orig_opts[chosen_idx].strip()
     raw_ans = str(q_item.get('answer', '')).strip()
 
-    # 1. 萃取純字母代號 (支援 A / (A) / A. / A) / 【A】)
     m_single = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[】\]）\)\.\、\:\s]*$', raw_ans)
     clean_ans_letter = m_single.group(1).upper() if m_single else ""
 
     opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else str(chosen_idx + 1)
 
-    # 🎯 只要正解是單一字母 (A, B, C, D, E)，只比對選項字母代號，絕對不比對選項內文！
     if clean_ans_letter:
         return opt_letter == clean_ans_letter
 
-    # 2. 若正解開頭帶有字母 (例如 "D) LDL receptor ...")
     m_head = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[\)）\]\.\、\:\s]', raw_ans)
     if m_head:
         return opt_letter == m_head.group(1).upper()
 
-    # 3. 只有當正解為完整文字敘述時（且非單字母），才執行文字全等比對
     clean_choice = strip_option_prefix(chosen_str)
     clean_target = strip_option_prefix(raw_ans)
     if clean_choice and clean_target and clean_choice.lower() == clean_target.lower():
@@ -287,15 +281,16 @@ def check_is_correct(chosen_idx, q_item):
 
     return False
 
-# 🌟 單題專用深度剖析器
+# 🌟 單題專用深度剖析器（支援參考答案：(A)、流行病學大標、(A)~(E) 選項）
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
 
+    # 1. 抓取答案：支援 參考答案：(A)、【答案】、Correct Answer 等
     ans = ""
     ans_patterns = [
-        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
-        r'(?:Correct\s*Answer|Answer|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?(?=[\s\.\、\:\)]|$)'
+        r'【\s*(?:正確答案|參考答案|答案|解答|正解|Ans|Key)\s*】\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?',
+        r'(?:Correct\s*Answer|Answer|參考答案|解答|答案|正解|Ans|Key)\s*[:：\s]*[\(（]?([A-Ea-e])[\)）]?(?=[\s\.\、\:\)]|$)'
     ]
     m_ans = None
     for ap in ans_patterns:
@@ -305,9 +300,11 @@ def parse_single_question_block(b):
             m_ans = m
             break
 
+    # 2. 抓取標籤（如【跨章節】）
     tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
+    # 3. 抓取解析
     exp = ""
     exp_patterns = [
         r'【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*】\s*[:：\s]*([\s\S]*)$',
@@ -318,7 +315,7 @@ def parse_single_question_block(b):
         m = re.search(ep, b, re.IGNORECASE)
         if m:
             exp = clean_file_artifacts(m.group(1).strip())
-            exp = re.sub(r'(?:\n\s*)*第\s*\d+\s*章[^\n]*$', '', exp).strip()
+            exp = re.sub(r'(?:\n\s*)*(?:第\s*\d+\s*章|[一二三四五六七八九十]+[、\.]\s*)[^\n]*$', '', exp).strip()
             m_exp = m
             break
 
@@ -326,14 +323,16 @@ def parse_single_question_block(b):
         all_tags = "\n".join(tags_text)
         exp = f"{all_tags}\n\n{exp}" if exp else all_tags
 
+    # 4. 截除答案與解析，保留題幹與選項主體
     end_markers = [
-        r'【\s*(?:正確答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
-        r'(?:Correct\s*Answer|Answer|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
+        r'【\s*(?:正確答案|參考答案|答案|解答|正解|Ans|Key|解析|簡析|詳解|跨章節|跨單元)\s*】',
+        r'(?:Correct\s*Answer|Answer|參考答案|解答|答案|正解|解析|簡析|詳解)\s*[:：]'
     ]
     all_end_pos = [m.start() for pat in end_markers for m in re.finditer(pat, b)]
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
+    # 5. 搜尋選項 A, B, C, D (及可選的 E)
     def find_markers(text, letter):
         pat = (
             r'[\(（]' + letter + r'[\)）]\s*'
@@ -373,7 +372,9 @@ def parse_single_question_block(b):
     if not chosen_A or not chosen_B or not chosen_C:
         return None
 
+    # 6. 提取題幹（過濾「一、疾病頻率測量...」、「第 10 章...」）
     stem = q_opts_part[:chosen_A.start()].strip()
+    stem = re.sub(r'^[一二三四五六七八九十]+[、\.\s]+[^\n]*\n*', '', stem).strip()
     stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*章[^\n]*\n*', '', stem).strip()
     stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem).strip()
@@ -382,6 +383,7 @@ def parse_single_question_block(b):
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
     stem = clean_file_artifacts(stem)
 
+    # 7. 提取各選項
     opt_A = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
     opt_B = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
@@ -423,7 +425,7 @@ def parse_questions_locally(raw_text):
         r'(?:^|\n)\s*第\s*\d+\s*題(?:\s*\n\s*題目\s*[:：])?'
         r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*第?\s*\d+\s*題[\)）]'
         r'|(?:^|\n)\s*題目\s*[:：]'
-        r'|(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案)[A-Za-z0-9\-_]{2,}】'
+        r'|(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案|參考答案)[A-Za-z0-9\-_]{2,}】'
         r'|(?:Question|question)\s*\d+'
         r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
         r'|(?<=[\n\r。！？；!?;」』\)])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)\s*[\.\、\:\)])'
@@ -693,7 +695,7 @@ with tab_practice:
                 if not selected_pdfs: st.error("請勾選考卷！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
-                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "") + (" ORDER BY category ASC, id ASC" if q_order == "照考卷順序" else "")
+                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, question_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "") + (" ORDER BY category ASC, id ASC" if q_order == "照考卷順序" else "")
                     c.execute(query, tuple(list(selected_pdfs)))
                     q_pool = c.fetchall()
                     if not q_pool: st.warning("無符合題目！")
@@ -744,7 +746,12 @@ with tab_practice:
 
         st.divider()
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
-        with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
+        with col_t: 
+            st.subheader(f"Q{idx + 1}. {disp_text}")
+            # 🌟 支援題目配圖渲染
+            q_img = curr_q.get('question_image', '')
+            if q_img:
+                st.image(q_img, use_container_width=True)
         with col_lang_btn:
             target_flip = "zh" if curr_lang == "en" else "en"
             btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
@@ -879,7 +886,7 @@ with tab_test:
                 if not selected_pdfs: st.error("請勾選考卷！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
-                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "")
+                    query = f"SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, explanation_image, question_image, text_en, options_en, text_zh, options_zh FROM questions WHERE category IN ({placeholders})" + (" AND is_starred=1" if only_star_q else "")
                     c.execute(query, tuple(list(selected_pdfs)))
                     q_pool = c.fetchall()
                     if not q_pool: st.warning("無符合題目！")
@@ -950,7 +957,11 @@ with tab_test:
 
         st.divider()
         col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
-        with col_t: st.subheader(f"Q{idx + 1}. {disp_text}")
+        with col_t: 
+            st.subheader(f"Q{idx + 1}. {disp_text}")
+            q_img = curr_q.get('question_image', '')
+            if q_img:
+                st.image(q_img, use_container_width=True)
         with col_lang_btn:
             target_flip = "zh" if curr_lang == "en" else "en"
             btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
@@ -1015,7 +1026,7 @@ with tab_test:
             st.session_state.exam_questions_cache, st.session_state.exam_user_answers = [], {}
             st.rerun()
 
-# ---------- 【📖 分頁三：錯題總覽區 (支援單題與批次刪除 + 完整修改題目與選項)】 ----------
+# ---------- 【📖 分頁三：錯題總覽區 (支援題目配圖檢視與更換)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 系統運作中，背景查詢已自動暫停。")
@@ -1066,6 +1077,11 @@ with tab_review:
                     q_opts = get_question_options(q)
                     with st.expander(f"{'⭐ ' if is_st else ''}第 {idx+1} 題 (ID: {q['id']}): {q['text'][:30]}... (錯 {q['wrong_count']} 次)"):
                         st.markdown(f"**【題目】** {q['text']}")
+                        
+                        # 題目圖片顯示
+                        if q.get('question_image'):
+                            st.image(q['question_image'], use_container_width=True)
+
                         for opt_i, opt_text in enumerate(q_opts):
                             st.markdown(f"- {format_clean_option(opt_text, opt_i)}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
@@ -1082,9 +1098,18 @@ with tab_review:
                                 time.sleep(0.5)
                                 st.rerun()
 
-                        with st.expander("✏️ 編輯題目、選項與詳解（修正缺字/漏字）"):
+                        # 🌟 完整編輯題目文字、題目照片、選項與詳解
+                        with st.expander("✏️ 編輯題目、題目配圖、選項與詳解"):
                             rev_text_input = st.text_area("修改題目內容：", value=q['text'], key=f"rev_q_txt_{q['id']}", height=100)
                             
+                            col_qimg_show, col_qimg_up = st.columns([1, 2])
+                            with col_qimg_show:
+                                if q.get('question_image'):
+                                    st.caption("當前題目圖片：")
+                                    st.image(q['question_image'], width=150)
+                            with col_qimg_up:
+                                rev_q_img_input = st.file_uploader("更換/新增【題目配圖】(病理/圖表/心電圖)", type=["png", "jpg", "jpeg"], key=f"rev_q_img_{q['id']}")
+
                             st.markdown("**修改各選項文字：**")
                             new_q_options = []
                             for o_idx, o_txt in enumerate(q_opts):
@@ -1104,12 +1129,17 @@ with tab_review:
                             with col_exp_e:
                                 rev_exp_input = st.text_area("修改解析說明：", value=q['explanation'] if q.get('explanation') and q['explanation'] != '無提供詳解' else "", key=f"rev_txt_{q['id']}")
 
-                            rev_img_input = st.file_uploader("更換筆記截圖 (PNG, JPG)", type=["png", "jpg", "jpeg"], key=f"rev_img_{q['id']}")
-                            col_sv_b, col_rm_img = st.columns(2)
+                            rev_exp_img_input = st.file_uploader("更換【解析筆記截圖】", type=["png", "jpg", "jpeg"], key=f"rev_exp_img_{q['id']}")
+                            
+                            col_sv_b, col_rm_qimg, col_rm_expimg = st.columns([1.5, 1, 1])
                             with col_sv_b:
-                                if st.button("💾 儲存修改內容", key=f"rev_save_btn_{q['id']}", use_container_width=True, type="primary"):
-                                    new_img_b64 = q.get('explanation_image', '')
-                                    if rev_img_input: new_img_b64 = compress_image_to_base64(rev_img_input)
+                                if st.button("💾 儲存所有修改", key=f"rev_save_btn_{q['id']}", use_container_width=True, type="primary"):
+                                    new_exp_img_b64 = q.get('explanation_image', '')
+                                    if rev_exp_img_input: new_exp_img_b64 = compress_image_to_base64(rev_exp_img_input)
+                                    
+                                    new_q_img_b64 = q.get('question_image', '')
+                                    if rev_q_img_input: new_q_img_b64 = compress_image_to_base64(rev_q_img_input)
+
                                     clean_opts_json = json.dumps(new_q_options, ensure_ascii=False)
                                     opt1_val = new_q_options[0] if len(new_q_options) > 0 else ""
                                     opt2_val = new_q_options[1] if len(new_q_options) > 1 else ""
@@ -1117,18 +1147,25 @@ with tab_review:
                                     opt4_val = new_q_options[3] if len(new_q_options) > 3 else ""
                                     c.execute("""
                                         UPDATE questions 
-                                        SET text=?, opt1=?, opt2=?, opt3=?, opt4=?, options=?, answer=?, explanation=?, explanation_image=? 
+                                        SET text=?, opt1=?, opt2=?, opt3=?, opt4=?, options=?, answer=?, explanation=?, explanation_image=?, question_image=? 
                                         WHERE id=?
-                                    """, (rev_text_input.strip(), opt1_val, opt2_val, opt3_val, opt4_val, clean_opts_json, rev_ans_input.strip().upper(), rev_exp_input.strip(), new_img_b64, q['id']))
+                                    """, (rev_text_input.strip(), opt1_val, opt2_val, opt3_val, opt4_val, clean_opts_json, rev_ans_input.strip().upper(), rev_exp_input.strip(), new_exp_img_b64, new_q_img_b64, q['id']))
                                     conn.commit()
-                                    st.toast("✅ 題目、選項與詳解已更新存入雲端！")
+                                    st.toast("✅ 題目內容與配圖已更新存入雲端！")
                                     time.sleep(0.5)
                                     st.rerun()
-                            with col_rm_img:
-                                if st.button("🗑️ 清除截圖", key=f"rev_rm_img_{q['id']}", use_container_width=True):
+                            with col_rm_qimg:
+                                if st.button("🗑️ 清除題目配圖", key=f"rev_rm_qimg_{q['id']}", use_container_width=True):
+                                    c.execute("UPDATE questions SET question_image='' WHERE id=?", (q['id'],))
+                                    conn.commit()
+                                    st.toast("✅ 題目圖片已清除！")
+                                    time.sleep(0.5)
+                                    st.rerun()
+                            with col_rm_expimg:
+                                if st.button("🗑️ 清除解析筆記", key=f"rev_rm_expimg_{q['id']}", use_container_width=True):
                                     c.execute("UPDATE questions SET explanation_image='' WHERE id=?", (q['id'],))
                                     conn.commit()
-                                    st.toast("✅ 筆記截圖已移除！")
+                                    st.toast("✅ 解析截圖已移除！")
                                     time.sleep(0.5)
                                     st.rerun()
 
@@ -1198,7 +1235,7 @@ with tab_ai_gen:
                     for g_item in st.session_state.ai_generated_temp:
                         opts_clean = [str(x).strip() for x in g_item.get('options', []) if str(x).strip()]
                         opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, text_en, options_en) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)",
+                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image, text_en, options_en) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'',?,?)",
                                   (gen_folder, save_cat_name, g_item.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(g_item.get('answer', '')), g_item.get('explanation', ''), g_item.get('text', ''), opts_json))
                     conn.commit()
                     st.session_state.ai_generated_temp = []
@@ -1206,7 +1243,7 @@ with tab_ai_gen:
                     time.sleep(1)
                     st.rerun()
 
-# ---------- 【📥 分頁五：匯入區 (全面支援極速本地正則引擎)】 ----------
+# ---------- 【📥 分頁五：匯入區 (新增單題圖文新增模式)】 ----------
 with tab_import:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 刷題進行中，此面板已自動休眠。")
@@ -1216,14 +1253,13 @@ with tab_import:
         folder_choice = st.selectbox("📂 目標資料夾：", ["-- ➕ 新增資料夾 --"] + existing_folders)
         target_folder = st.text_input("輸入新資料夾名稱：", "大三/生化") if folder_choice == "-- ➕ 新增資料夾 --" else folder_choice
 
-        engine_type = st.radio(
-            "⚙️ 選擇匯入引擎：",
-            ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，永遠不怕被鎖）", "🤖 AI 智慧解析（需 API 額度）"]
+        import_mode = st.radio(
+            "匯入方式：", 
+            ["📁 模式一：檔案整份上傳 (PDF, Word, PPT)", "📋 模式二：純文字直接貼上 (分卷/多題自動切分)", "🖼️ 模式三：單題快速新增 (文字敘述 + 題目照片)"]
         )
 
-        import_mode = st.radio("資料來源：", ["📁 檔案上傳 (PDF, Word, PPT)", "📋 純文字直接貼上"])
-
         if import_mode.startswith("📁"):
+            engine_type = st.radio("⚙️ 選擇匯入引擎：", ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，不怕被鎖）", "🤖 AI 智慧解析（需 API 額度）"], key="eng_f")
             uploaded_file = st.file_uploader("上傳試卷檔案", type=["pdf", "docx", "pptx", "txt", "md"])
             custom_name = st.text_input("📄 考卷自訂名稱：", value=uploaded_file.name if uploaded_file else "")
             
@@ -1251,7 +1287,7 @@ with tab_import:
                                 for nq in questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'')",
                                               (target_folder, final_name, nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], nq['explanation']))
                                 conn.commit()
                                 st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！（完全不耗 API 額度）")
@@ -1271,14 +1307,16 @@ with tab_import:
                                     for nq in questions:
                                         opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                         opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                        c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'')",
                                                   (target_folder, final_name, nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
                                     conn.commit()
                                     st.success(f"🎉 AI 成功存入 {len(questions)} 題！")
                                     time.sleep(1)
                                     st.rerun()
                                 else: st.error(err_msg)
-        else:
+
+        elif import_mode.startswith("📋"):
+            engine_type = st.radio("⚙️ 選擇匯入引擎：", ["⚡ 本地免 AI 極速解析（推薦！零額度消耗，不怕被鎖）", "🤖 AI 智慧解析（需 API 額度）"], key="eng_p")
             paste_category_name = st.text_input("📄 考卷/講義名稱：", value="未命名考卷")
             ptext = st.text_area("請在此貼上題目文字：", height=250)
             if st.button("🚀 開始匯入", type="primary") and ptext.strip():
@@ -1288,7 +1326,7 @@ with tab_import:
                         for nq in questions:
                             opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                             opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                            c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                            c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'')",
                                       (target_folder, paste_category_name.strip(), nq['text'], opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, nq['answer'], nq['explanation']))
                         conn.commit()
                         st.success(f"🎉 本地免 AI 引擎成功切分並存入 {len(questions)} 題！（完全不耗 API 額度）")
@@ -1306,13 +1344,59 @@ with tab_import:
                                 for nq in questions:
                                     opts_clean = [str(o).strip() for o in nq.get('options', []) if str(o).strip()]
                                     opts_json = json.dumps(opts_clean, ensure_ascii=False)
-                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred) VALUES (?,?,?,?,?,?,?,?,?,?,0,0)",
+                                    c.execute("INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image) VALUES (?,?,?,?,?,?,?,?,?,?,0,0,'')",
                                               (target_folder, paste_category_name.strip(), nq.get('text', ''), opts_clean[0] if len(opts_clean)>0 else "", opts_clean[1] if len(opts_clean)>1 else "", opts_clean[2] if len(opts_clean)>2 else "", opts_clean[3] if len(opts_clean)>3 else "", opts_json, str(nq.get('answer', '')), nq.get('explanation', '')))
                                 conn.commit()
                                 st.success(f"🎉 AI 成功存入 {len(questions)} 題！")
                                 time.sleep(1)
                                 st.rerun()
                             else: st.error(err_msg)
+
+        else:
+            # 🌟 模式三：單題快速新增（文字敘述 + 題目照片）
+            st.markdown("#### 🖼️ 新增【文字 ＋ 題目照片】單題")
+            existing_pdfs, _ = get_categories_by_folder(target_folder)
+            cat_choice = st.selectbox("📄 選擇所屬考卷 / 講義：", ["-- ➕ 輸入新考卷名稱 --"] + existing_pdfs)
+            target_category = st.text_input("輸入新考卷名稱：", "生理學/心血管專題") if cat_choice == "-- ➕ 輸入新考卷名稱 --" else cat_choice
+
+            m3_stem = st.text_area("✏️ 題目文字敘述：", placeholder="例如：下列何者為圖中標示箭頭處之細胞構造？", height=100)
+            m3_qimg_file = st.file_uploader("📷 上傳題目照片 (如病理玻片、心電圖、代謝途徑圖等)", type=["png", "jpg", "jpeg"], key="m3_q_img")
+
+            col_o1, col_o2 = st.columns(2)
+            with col_o1:
+                opt_a = st.text_input("選項 (A)：", placeholder="選項 A 內容")
+                opt_c = st.text_input("選項 (C)：", placeholder="選項 C 內容")
+                opt_e = st.text_input("選項 (E)（可選）：", placeholder="選項 E 內容 (若無可留空)")
+            with col_o2:
+                opt_b = st.text_input("選項 (B)：", placeholder="選項 B 內容")
+                opt_d = st.text_input("選項 (D)：", placeholder="選項 D 內容")
+                ans_choice = st.selectbox("✅ 正確答案：", ["A", "B", "C", "D", "E"])
+
+            m3_exp = st.text_area("💡 解析說明（可選）：", placeholder="填寫該題詳解或機制說明")
+            m3_exp_img_file = st.file_uploader("📝 上傳筆記截圖 / 解釋圖片（可選）", type=["png", "jpg", "jpeg"], key="m3_exp_img")
+
+            if st.button("💾 儲存並加入題庫", type="primary", use_container_width=True):
+                if not m3_stem.strip():
+                    st.error("請輸入題目文字！")
+                elif not opt_a.strip() or not opt_b.strip() or not opt_c.strip() or not opt_d.strip():
+                    st.error("請至少完整填寫 A、B、C、D 四個選項！")
+                else:
+                    opts_list = [f"(A) {opt_a.strip()}", f"(B) {opt_b.strip()}", f"(C) {opt_c.strip()}", f"(D) {opt_d.strip()}"]
+                    if opt_e.strip():
+                        opts_list.append(f"(E) {opt_e.strip()}")
+                    opts_json = json.dumps(opts_list, ensure_ascii=False)
+
+                    q_img_b64 = compress_image_to_base64(m3_qimg_file) if m3_qimg_file else ""
+                    exp_img_b64 = compress_image_to_base64(m3_exp_img_file) if m3_exp_img_file else ""
+
+                    c.execute("""
+                        INSERT INTO questions (folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, question_image, explanation_image)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                    """, (target_folder, target_category, m3_stem.strip(), opts_list[0], opts_list[1], opts_list[2], opts_list[3], opts_json, ans_choice, m3_exp.strip(), q_img_b64, exp_img_b64))
+                    conn.commit()
+                    st.success("🎉 題目與照片已成功儲存至雲端題庫！")
+                    time.sleep(1)
+                    st.rerun()
 
 # ---------- 【⚙️ 分頁六：設定與資料夾完整管理區】 ----------
 with tab_settings:
