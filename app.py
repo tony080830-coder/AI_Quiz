@@ -36,9 +36,8 @@ class CursorWrapper:
         return getattr(self.cursor, 'description', None)
 
     def execute(self, sql, params=None):
-        if params is not None:
-            if isinstance(params, list):
-                params = tuple(params)
+        if params is not None and isinstance(params, list):
+            params = tuple(params)
         try:
             if params is not None:
                 self.cursor.execute(sql, params)
@@ -47,10 +46,8 @@ class CursorWrapper:
             return self
         except Exception as e:
             err_msg = str(e).lower()
-            # 若為欄位已存在或一般語法錯誤，直接拋出不重連，避免重連風暴
             if "duplicate column" in err_msg or "already exists" in err_msg:
                 raise e
-            # 僅在連線中斷時重連一次
             self.db_wrapper.reconnect()
             self.cursor = self.db_wrapper.conn.cursor()
             if params is not None:
@@ -162,7 +159,6 @@ c = db_instance.cursor()
 IS_CLOUD = db_instance.is_cloud
 CLOUD_ERROR = db_instance.cloud_err
 
-# 🌟 快取查詢引擎：避免每次點擊都跨國查詢雲端資料庫
 @st.cache_data(ttl=120)
 def get_cached_folder_structure():
     try:
@@ -217,7 +213,6 @@ def get_categories_by_folder(folder=None, only_star=False):
         star_map[cat] = star_map.get(cat, False) or it['pdf_starred']
     return sorted(list(set(pdf_list))), star_map
 
-# 🌟 按需載入單題圖片（避免一次拉取整份題庫圖片造成卡頓）
 def get_question_images_lazy(qid):
     cache_key = f"_img_cache_{qid}"
     if cache_key in st.session_state:
@@ -263,7 +258,6 @@ def is_primarily_english(text):
     en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
     return en_words >= zh_chars
 
-# 🌟 精準標籤剝離器（保護 CTP, CMP, ATP, DNA 等專有名詞不被誤切字首）
 def strip_option_prefix(text):
     if not text:
         return ""
@@ -283,10 +277,11 @@ def format_clean_option(opt_text, opt_idx=0):
 
 def clean_file_artifacts(text):
     if not text: return ""
+    # 清除 PDF + 4, PDF, Pdf, JPG 與 NotebookLM / Gemini 來源膠囊 (如 M123_ 公衛綜論二_隨堂考....)
     cleaned = re.sub(r'\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG|Pdf)\b\s*', ' ', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*[A-Za-z0-9]+_\s*[^\n\(\)（），。！？\?]*?(?:\.\.\.+|…+)\s*', ' ', cleaned)
     return cleaned.strip()
 
-# 🌟 嚴格精準比對答案（解決 LDL 含 D 誤判問題）
 def check_is_correct(chosen_idx, q_item):
     orig_opts = get_question_options(q_item)
     if chosen_idx is None or chosen_idx < 0 or chosen_idx >= len(orig_opts):
@@ -295,7 +290,7 @@ def check_is_correct(chosen_idx, q_item):
     chosen_str = orig_opts[chosen_idx].strip()
     raw_ans = str(q_item.get('answer', '')).strip()
 
-    m_single = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[】\]）\)\.\、\:\s]*$', raw_ans)
+    m_single = re.search(r'^[oO○◦•●\-\*\s【\[（\(]*([A-Ea-e1-5])[】\]）\)\.\、\:\s]*$', raw_ans)
     clean_ans_letter = m_single.group(1).upper() if m_single else ""
 
     opt_letter = chr(65 + chosen_idx) if chosen_idx < 26 else str(chosen_idx + 1)
@@ -303,7 +298,7 @@ def check_is_correct(chosen_idx, q_item):
     if clean_ans_letter:
         return opt_letter == clean_ans_letter
 
-    m_head = re.search(r'^[oO○•●\-\*\s【\[（\(]*([A-Ea-e1-5])[\)）\]\.\、\:\s]', raw_ans)
+    m_head = re.search(r'^[oO○◦•●\-\*\s【\[（\(]*([A-Ea-e1-5])[\)）\]\.\、\:\s]', raw_ans)
     if m_head:
         return opt_letter == m_head.group(1).upper()
 
@@ -314,7 +309,6 @@ def check_is_correct(chosen_idx, q_item):
 
     return False
 
-# 🌟 極速批次匯入函數（將多題打包成單一 SQL 批次寫入，速度快 20 倍）
 def batch_insert_questions(target_folder, category_name, question_list):
     if not question_list:
         return 0
@@ -336,7 +330,6 @@ def batch_insert_questions(target_folder, category_name, question_list):
             nq.get('question_image', '')
         ))
     
-    # 每 20 題打包成一個多列 INSERT 語句，大幅減少雲端往返次數
     chunk_size = 20
     for i in range(0, len(rows_to_insert), chunk_size):
         chunk = rows_to_insert[i:i+chunk_size]
@@ -349,6 +342,17 @@ def batch_insert_questions(target_folder, category_name, question_list):
     conn.commit()
     refresh_cache()
     return len(rows_to_insert)
+
+# 🌟 精準尋找選項 A~E 位置（保護英文單字字尾小寫 a./c./d./e. 不被誤判）
+def find_option_markers(text, letter):
+    u_let = letter.upper()
+    l_let = letter.lower()
+    pat = (
+        r'[\(（\[]\s*[' + u_let + l_let + r']\s*[\)）\]]\s*'
+        r'|(?:^|(?<=[\s\n\r\o\O\○\◦\•\●\▪\▫\)\）\]\；\，\。]))[' + u_let + l_let + r'][\)）\.\、\:\：]\s*'
+        r'|(?<=[a-zA-Z0-9\-\_\)])' + u_let + r'[\)）\.\、]\s*'
+    )
+    return list(re.finditer(pat, text))
 
 # 🌟 單題專用深度剖析器
 def parse_single_question_block(b):
@@ -366,7 +370,7 @@ def parse_single_question_block(b):
             ans = m.group(1).upper()
             break
 
-    tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
+    tag_matches = list(re.finditer(r'(?:^[ \t]*[oO○◦•●\-\*]?\s*)?(【(?:跨章節|跨單元|出處)[^】]*】[^\n]*)', b, re.MULTILINE))
     tags_text = [clean_file_artifacts(tm.group(1).strip()) for tm in tag_matches]
 
     exp = ""
@@ -393,20 +397,11 @@ def parse_single_question_block(b):
     pos_end = min(all_end_pos) if all_end_pos else len(b)
     q_opts_part = b[:pos_end].strip()
 
-    def find_markers(text, letter):
-        pat = (
-            r'[\(（]' + letter + r'[\)）]\s*'
-            r'|(?<=[\s\n\r\.\,\;\:\)\]\"\'\>])' + letter + r'[\)）\.\、\:\：]\s*'
-            r'|^' + letter + r'[\)）\.\、\:\：]\s*'
-            r'|(?<=[a-zA-Z0-9\-\_\)])' + letter + r'[\)）\.\、\:\：]\s*'
-        )
-        return list(re.finditer(pat, text, re.IGNORECASE))
-
-    A_matches = find_markers(q_opts_part, 'A')
-    B_matches = find_markers(q_opts_part, 'B')
-    C_matches = find_markers(q_opts_part, 'C')
-    D_matches = find_markers(q_opts_part, 'D')
-    E_matches = find_markers(q_opts_part, 'E')
+    A_matches = find_option_markers(q_opts_part, 'A')
+    B_matches = find_option_markers(q_opts_part, 'B')
+    C_matches = find_option_markers(q_opts_part, 'C')
+    D_matches = find_option_markers(q_opts_part, 'D')
+    E_matches = find_option_markers(q_opts_part, 'E')
 
     chosen_A = chosen_B = chosen_C = chosen_D = chosen_E = None
 
@@ -433,32 +428,33 @@ def parse_single_question_block(b):
         return None
 
     stem = q_opts_part[:chosen_A.start()].strip()
-    stem = re.sub(r'^[一二三四五六七八九十]+[、\.\s]+[^\n]*\n*', '', stem).strip()
-    stem = re.sub(r'^[ \t]*[oO○•●\-\*]\s*', '', stem)
-    stem = re.sub(r'^第\s*\d+\s*章[^\n]*\n*', '', stem).strip()
+    # 僅在後面確實有換行時才剝除大標題，避免單行貼上時把題幹誤刪
+    stem = re.sub(r'^\s*[一二三四五六七八九十]+[、\.\s]+[^\n]+\n+\s*', '', stem).strip()
+    stem = re.sub(r'^\s*第\s*\d+\s*章[^\n]+\n+\s*', '', stem).strip()
+    stem = re.sub(r'^[ \t]*[oO○◦•●▪▫\-\*]\s*', '', stem)
     stem = re.sub(r'^第\s*\d+\s*題\s*', '', stem).strip()
     stem = re.sub(r'^題目\s*[\(（][^\n\)]*\d+\s*題[\)）]\s*[:：]?', '', stem).strip()
     stem = re.sub(r'^題目\s*[:：]\s*', '', stem).strip()
     stem = re.sub(r'^(?:(?:Question|question|Q|q)\s*\d+|\d+(?:[-_.]\d+)?\s*[\.\、\:\)）]|[\(（\[]\d+(?:[-_.]\d+)?[\)）\]])\s*(?!【)', '', stem).strip()
-    stem = clean_file_artifacts(stem)
+    stem = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(stem)).strip()
 
-    opt_A = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
-    opt_B = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
+    opt_A = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_A.end() : chosen_B.start()].strip()))
+    opt_B = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_B.end() : chosen_C.start()].strip()))
     options = [f"(A) {opt_A}", f"(B) {opt_B}"]
 
     if chosen_D:
-        opt_C = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end() : chosen_D.start()].strip()))
+        opt_C = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end() : chosen_D.start()].strip()))
         options.append(f"(C) {opt_C}")
         if chosen_E:
-            opt_D = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end() : chosen_E.start()].strip()))
-            opt_E = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_E.end():].strip()))
+            opt_D = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end() : chosen_E.start()].strip()))
+            opt_E = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_E.end():].strip()))
             options.append(f"(D) {opt_D}")
             options.append(f"(E) {opt_E}")
         else:
-            opt_D = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end():].strip()))
+            opt_D = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_D.end():].strip()))
             options.append(f"(D) {opt_D}")
     else:
-        opt_C = re.sub(r'\s*[oO○•●\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end():].strip()))
+        opt_C = re.sub(r'\s*[oO○◦•●▪▫\-\*]\s*$', '', clean_file_artifacts(q_opts_part[chosen_C.end():].strip()))
         options.append(f"(C) {opt_C}")
 
     if not ans:
@@ -471,44 +467,128 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 全文全自動切題引擎
+# 🌟 當區塊內仍包含多組 (A)(B)(C)(D) 時（例如無題號且無答案分隔），自動拆分為多題
+def split_block_by_option_cycles(block):
+    A_matches = find_option_markers(block, 'A')
+    B_matches = find_option_markers(block, 'B')
+    C_matches = find_option_markers(block, 'C')
+    D_matches = find_option_markers(block, 'D')
+    E_matches = find_option_markers(block, 'E')
+
+    cycles = []
+    last_end = -1
+    for ma in A_matches:
+        if ma.start() < last_end:
+            continue
+        mb_cand = [mb for mb in B_matches if mb.start() > ma.end()]
+        if not mb_cand: continue
+        mb = mb_cand[0]
+        mc_cand = [mc for mc in C_matches if mc.start() > mb.end()]
+        if not mc_cand: continue
+        mc = mc_cand[0]
+        
+        md_cand = [md for md in D_matches if md.start() > mc.end() and (not [ a for a in A_matches if mc.end() < a.start() < md.start() ])]
+        md = md_cand[0] if md_cand else None
+        me = None
+        if md:
+            me_cand = [me_it for me_it in E_matches if me_it.start() > md.end() and (not [ a for a in A_matches if md.end() < a.start() < me_it.start() ])]
+            me = me_cand[0] if me_cand else None
+
+        last_opt_marker = me or md or mc
+        last_end = last_opt_marker.end()
+        cycles.append((ma, last_opt_marker))
+
+    if len(cycles) <= 1:
+        return [block]
+
+    sub_blocks = []
+    prev_cut = 0
+    for idx in range(len(cycles) - 1):
+        curr_last_opt = cycles[idx][1]
+        next_A = cycles[idx + 1][0]
+        between = block[curr_last_opt.end() : next_A.start()]
+        
+        # 在上一題最後一個選項與下一題 (A) 之間，尋找下一題題幹的起點（最後一個換行或句號之後）
+        lines = between.split('\n')
+        if len(lines) >= 2:
+            # 最後一個非空行通常是下一題的題幹
+            non_empty_indices = [i for i, l in enumerate(lines) if l.strip() and not re.match(r'^[oO○◦•●\-\*\s]*(?:參考答案|答案|解答|正解|【答案】|【解答】)', l.strip())]
+            if non_empty_indices:
+                stem_line_idx = non_empty_indices[-1]
+                offset = sum(len(l) + 1 for l in lines[:stem_line_idx])
+                cut_pos = curr_last_opt.end() + offset
+                sub_blocks.append(block[prev_cut:cut_pos].strip())
+                prev_cut = cut_pos
+                continue
+
+        # 若無換行，找最後一個句號 `。`
+        last_period = between.rfind('。')
+        if last_period != -1:
+            cut_pos = curr_last_opt.end() + last_period + 1
+            sub_blocks.append(block[prev_cut:cut_pos].strip())
+            prev_cut = cut_pos
+
+    sub_blocks.append(block[prev_cut:].strip())
+    return [sb for sb in sub_blocks if sb]
+
+# 🌟 三層防漏全文切題引擎（支援無題號、同行黏連、參考答案後自動切題）
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
 
     text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
 
+    # 第一層：在「答案行（且後方未接解析）」之後自動插入切題標記，徹底解決複製時題號 1., 2. 消失的問題
+    ans_end_split_pattern = (
+        r'((?:【\s*(?:正確答案|參考答案|答案|解答|正解|Ans|Key)\s*】|(?:Correct\s*Answer|Answer|參考答案|解答|答案|正解|Ans|Key))\s*[:：\s]*[\(（]?[A-Ea-e][\)）]?'
+        r'(?:\s*\b(?:PDF\s*\+\s*\d+|PDF|JPG|PNG|Pdf)\b)?'
+        r'(?:\s*[A-Za-z0-9]+_\s*[^\n\(\)（），。！？\?]*?(?:\.\.\.+|…+))?)'
+        r'(?=\s*(?:\n|$|\d|\bQuestion|第\s*\d|題目|【|[^\s\n解析詳解簡析說明]))'
+    )
+    
+    # 檢查答案後方是否緊接「解析/詳解/跨章節」，若無則插入 "\n<Q_SPLIT>\n"
+    def insert_split_after_ans(match):
+        full_str = match.string
+        end_idx = match.end()
+        rest = full_str[end_idx:].lstrip()
+        if re.match(r'^(?:[oO○◦•●▪▫\-\*]\s*)?(?:【\s*(?:(?:中文)?(?:解析|簡析|詳解|說明)|跨章節|跨單元|出處)|(?:(?:中文)?(?:解析|簡析|詳解|說明)|Explanation)\s*[:：])', rest, re.IGNORECASE):
+            return match.group(0)
+        return match.group(0) + "\n<Q_SPLIT>\n"
+
+    text = re.sub(ans_end_split_pattern, insert_split_after_ans, text, flags=re.IGNORECASE)
+
+    # 第二層：在所有明確題號前插入 "<Q_SPLIT>"
     q_start_regex = (
         r'(?:'
-        r'(?:^|\n)\s*第\s*\d+\s*題(?:\s*\n\s*題目\s*[:：])?'
+        r'(?:^|\n)\s*第\s*\d+\s*題(?:\s*\n*\s*題目\s*[:：])?'
         r'|(?:^|\n)\s*題目\s*[\(（][^\n\)]*第?\s*\d+\s*題[\)）]'
         r'|(?:^|\n)\s*題目\s*[:：]'
-        r'|(?:[oO○•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案|參考答案)[A-Za-z0-9\-_]{2,}】'
+        r'|(?:[oO○◦•●\-\*]\s*)?【(?!答案|解答|正解|解析|簡析|說明|跨章節|跨單元|出處|正確答案|參考答案|中文解析)[A-Za-z0-9\-_]{2,}】'
         r'|(?:Question|question)\s*\d+'
         r'|(?:^|\n)\s*(?:[Qq]\s*)?\d+(?:[-_.]\d+)?\s*(?:[\.\、\:\)）]|(?=\s*【))'
-        r'|(?<=[\n\r。！？；!?;」』\)])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)\s*[\.\、\:\)])'
+        r'|(?<=[\n\r。！？；!?;」』\)）])\s*(?:第\s*\d+\s*題|[Qq]\s*\d+|\b\d+(?:[-_]\d+)?\s*[\.\、\:\)）]\s*(?=[^\d\s]))'
         r')'
     )
     splits = list(re.finditer(q_start_regex, text))
-
-    blocks = []
     if splits:
-        if splits[0].start() > 0:
-            pre_block = text[:splits[0].start()].strip()
-            if pre_block:
-                blocks.append(pre_block)
+        parts = []
+        last_idx = 0
+        for m in splits:
+            parts.append(text[last_idx:m.start()])
+            parts.append("\n<Q_SPLIT>\n")
+            last_idx = m.start()
+        parts.append(text[last_idx:])
+        text = "".join(parts)
 
-        for i in range(len(splits)):
-            start = splits[i].start()
-            end = splits[i+1].start() if i + 1 < len(splits) else len(text)
-            blocks.append(text[start:end].strip())
-    else:
-        blocks = [b.strip() for b in text.split('\n\n') if len(b.strip()) > 10]
-        if not blocks:
-            blocks = [text.strip()]
+    raw_blocks = [b.strip() for b in text.split("<Q_SPLIT>") if len(b.strip()) > 10]
+
+    # 第三層：若單一區塊內仍有多組 (A)(B)(C)(D)，自動按選項週期拆分
+    final_blocks = []
+    for rb in raw_blocks:
+        final_blocks.extend(split_block_by_option_cycles(rb))
 
     parsed_questions = []
-    for b in blocks:
+    for b in final_blocks:
         item = parse_single_question_block(b)
         if item and item['text'] and len(item['options']) >= 2:
             parsed_questions.append(item)
@@ -753,7 +833,6 @@ with tab_practice:
                 if not selected_pdfs: st.error("請勾選考卷！")
                 else:
                     placeholders = ','.join(['?'] * len(selected_pdfs))
-                    # 🌟 極速查詢：不一次拉取肥大的 Base64 圖片，只檢測是否有圖 (has_q_img, has_exp_img)
                     query = f"""
                         SELECT id, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, is_starred, pdf_starred, 
                                (CASE WHEN question_image IS NOT NULL AND question_image != '' THEN 1 ELSE 0 END) as has_q_img,
@@ -1168,7 +1247,6 @@ with tab_review:
             with col_f: rev_folder = st.selectbox("📂 選擇資料夾：", ["全部資料夾"] + folders)
             with col_p:
                 rev_pdfs, rev_star_map = get_categories_by_folder(rev_folder)
-                # 預設選第一份考卷（避免一開始就載入全部幾百題）
                 default_pdf_opts = rev_pdfs + ["全部考卷"] if rev_pdfs else ["全部考卷"]
                 rev_pdf = st.selectbox("📄 選擇考卷 / 講義：", default_pdf_opts, format_func=lambda x: f"⭐ {x}" if rev_star_map.get(x) else x)
             with col_st:
@@ -1197,13 +1275,12 @@ with tab_review:
                 st.warning("此分類下沒有找到題目。")
             else:
                 total_found = len(questions_to_show)
-                # 🌟 分頁載入機制：每頁顯示 15 題，畫面秒開不卡頓
                 page_size = 15
                 total_pages = max(1, (total_found + page_size - 1) // page_size)
                 
                 col_info, col_page = st.columns([2, 1])
                 with col_info:
-                    st.write(f"共找到 **{total_found}** 題（目前顯示第 1 ~ {min(page_size, total_found)} 題範圍）：")
+                    st.write(f"共找到 **{total_found}** 題（每頁顯示 {page_size} 題）：")
                 with col_page:
                     curr_page = st.number_input(f"📄 頁碼 (共 {total_pages} 頁)：", min_value=1, max_value=total_pages, value=1, step=1) if total_pages > 1 else 1
 
@@ -1249,7 +1326,6 @@ with tab_review:
                         
                         col_edt_toggle, col_del_single = st.columns([3, 1])
                         with col_edt_toggle:
-                            # 🌟 按需渲染編輯表單：勾選時才載入上傳器與輸入框，速度提升 10 倍
                             open_edit = st.checkbox("✏️ 開啟編輯模式（修改題目 / 選項 / 配圖 / 詳解）", key=f"open_edt_{qid}")
                         with col_del_single:
                             if st.button("🗑️ 刪除此題", key=f"del_single_q_{qid}", use_container_width=True):
@@ -1620,7 +1696,7 @@ with tab_settings:
 
         st.divider()
 
-        # 單一考卷詳細管理 (下拉選單極速載入，不塞爆畫面)
+        # 單一考卷詳細管理
         st.subheader("📄 單一考卷詳細管理 (更名 / 星號 / 移動 / 刪除)")
         st.caption("💡 選擇欲管理的考卷即可直接更名、標記星號或修改資料夾路徑。")
         if all_items:
