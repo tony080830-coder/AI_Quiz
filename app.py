@@ -254,9 +254,9 @@ def get_question_options(q):
     return opts if opts else ["A", "B"]
 
 def is_primarily_english(text):
-    zh_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
-    en_words = len(re.findall(r'[a-zA-Z]{2,}', text))
-    return en_words >= zh_chars
+    zh_chars = len(re.findall(r'[\u4e00-\u9fff]', str(text)))
+    en_words = len(re.findall(r'[a-zA-Z]{2,}', str(text)))
+    return en_words > zh_chars * 1.5 if zh_chars > 0 else True
 
 def strip_option_prefix(text):
     if not text:
@@ -342,7 +342,6 @@ def batch_insert_questions(target_folder, category_name, question_list):
     refresh_cache()
     return len(rows_to_insert)
 
-# 🌟 修復正則跳脫語法錯誤：移除非法 \o 與 \O 跳脫
 def find_option_markers(text, letter):
     u_let = letter.upper()
     l_let = letter.lower()
@@ -353,7 +352,6 @@ def find_option_markers(text, letter):
     )
     return list(re.finditer(pat, text))
 
-# 🌟 單題專用深度剖析器
 def parse_single_question_block(b):
     if not b or len(b.strip()) < 10:
         return None
@@ -465,7 +463,6 @@ def parse_single_question_block(b):
         "explanation": exp
     }
 
-# 🌟 當區塊內仍包含多組 (A)(B)(C)(D) 時，自動拆分為多題
 def split_block_by_option_cycles(block):
     A_matches = find_option_markers(block, 'A')
     B_matches = find_option_markers(block, 'B')
@@ -526,7 +523,6 @@ def split_block_by_option_cycles(block):
     sub_blocks.append(block[prev_cut:].strip())
     return [sb for sb in sub_blocks if sb]
 
-# 🌟 三層防漏全文切題引擎
 def parse_questions_locally(raw_text):
     if not raw_text or not raw_text.strip():
         return []
@@ -678,42 +674,123 @@ def call_gemini_text_fallback(prompt, api_key):
         except Exception: continue
     return None
 
-def get_question_bilingual(q, target_lang="en"):
+# ================= 🌟 智慧雙語快取與按需翻譯核心引擎 =================
+def get_question_lang_state(q, pref_mode="orig"):
+    """
+    計算單題目前的實際顯示語言、題幹、選項，以及目標切換語言是否已有雲端快取。
+    絕不自動呼叫 API，確保 0 延遲。
+    """
+    qid = q['id']
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
-    is_orig_en = is_primarily_english(orig_text)
+    orig_lang = "en" if is_primarily_english(orig_text) else "zh"
 
-    if (target_lang == "en" and is_orig_en) or (target_lang == "zh" and not is_orig_en):
-        return orig_text, orig_opts
+    has_en_cache = (orig_lang == "en") or bool(q.get('text_en') and str(q['text_en']).strip())
+    has_zh_cache = (orig_lang == "zh") or bool(q.get('text_zh') and str(q['text_zh']).strip())
 
-    col_t = "text_en" if target_lang == "en" else "text_zh"
-    col_o = "options_en" if target_lang == "en" else "options_zh"
-    
-    if q.get(col_t) and str(q[col_t]).strip():
-        try: return q[col_t], (json.loads(q[col_o]) if q.get(col_o) else orig_opts)
-        except Exception: return q[col_t], orig_opts
+    # 決定欲顯示的語言
+    override_lang = st.session_state.exam_lang_overrides.get(qid, None)
+    if override_lang:
+        desired_lang = override_lang
+    elif pref_mode == "en" and has_en_cache:
+        desired_lang = "en"
+    elif pref_mode == "zh" and has_zh_cache:
+        desired_lang = "zh"
+    else:
+        desired_lang = orig_lang
 
-    return orig_text, orig_opts
+    # 取出該語言對應的文字與選項（若無快取則退回原文）
+    if desired_lang == orig_lang:
+        disp_text, disp_opts, actual_lang = orig_text, orig_opts, orig_lang
+    elif desired_lang == "en" and has_en_cache:
+        try:
+            opts_en = json.loads(q['options_en']) if q.get('options_en') else orig_opts
+        except Exception:
+            opts_en = orig_opts
+        disp_text, disp_opts, actual_lang = q['text_en'], opts_en, "en"
+    elif desired_lang == "zh" and has_zh_cache:
+        try:
+            opts_zh = json.loads(q['options_zh']) if q.get('options_zh') else orig_opts
+        except Exception:
+            opts_zh = orig_opts
+        disp_text, disp_opts, actual_lang = q['text_zh'], opts_zh, "zh"
+    else:
+        disp_text, disp_opts, actual_lang = orig_text, orig_opts, orig_lang
+
+    target_flip_lang = "zh" if actual_lang == "en" else "en"
+    target_is_cached = has_zh_cache if target_flip_lang == "zh" else has_en_cache
+
+    return disp_text, disp_opts, actual_lang, target_flip_lang, target_is_cached
 
 def translate_question_on_demand(q, target_lang, api_key):
+    """
+    僅在點擊翻譯按鈕且無快取時呼叫一次 Gemini，並永久存入 Turso 資料庫。
+    """
     orig_text = q.get('text', '')
     orig_opts = get_question_options(q)
+    clean_orig_opts = [strip_option_prefix(o) for o in orig_opts]
     col_t = "text_en" if target_lang == "en" else "text_zh"
     col_o = "options_en" if target_lang == "en" else "options_zh"
 
-    try:
-        lang_target_desc = "專業醫學英文 (USMLE English)" if target_lang == "en" else "繁體中文（台灣醫學常用術語）"
-        prompt = f'請將以下題目翻譯為【{lang_target_desc}】。\n題目：{orig_text}\n選項：{orig_opts}\n\n以標準 JSON 格式輸出：\n{{"text": "...", "options": [...]}}'
-        parsed_list, _ = call_gemini_guaranteed(prompt, api_key)
-        parsed = parsed_list[0] if parsed_list else {}
-        trans_text = parsed.get('text', orig_text)
-        trans_opts = parsed.get('options', orig_opts)
-        c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, json.dumps(trans_opts, ensure_ascii=False), q['id']))
-        conn.commit()
-        q[col_t], q[col_o] = trans_text, json.dumps(trans_opts, ensure_ascii=False)
-        return trans_text, trans_opts
-    except Exception:
-        return orig_text, orig_opts
+    lang_target_desc = (
+        "專業醫學英文 (USMLE Step 1 style English)" 
+        if target_lang == "en" 
+        else "繁體中文（台灣醫學國考常用術語，專有名詞可括號保留英文）"
+    )
+    prompt = (
+        f"請將以下醫學選擇題的題幹與 {len(clean_orig_opts)} 個選項完整翻譯為【{lang_target_desc}】。\n"
+        f"題目：{orig_text}\n"
+        f"選項清單：{json.dumps(clean_orig_opts, ensure_ascii=False)}\n\n"
+        f"請嚴格只輸出 JSON 物件格式（選項數量必須為 {len(clean_orig_opts)} 個）：\n"
+        '{"text": "翻譯後的題幹...", "options": ["選項A內容", "選項B內容", ...]}'
+    )
+    parsed_list, err = call_gemini_guaranteed(prompt, api_key)
+    if not parsed_list or not isinstance(parsed_list[0], dict):
+        return False, err or "翻譯解析失敗"
+
+    parsed = parsed_list[0]
+    trans_text = str(parsed.get('text', '')).strip() or orig_text
+    raw_trans_opts = parsed.get('options', [])
+    if not isinstance(raw_trans_opts, list) or len(raw_trans_opts) == 0:
+        formatted_opts = orig_opts
+    else:
+        formatted_opts = [format_clean_option(o, i) for i, o in enumerate(raw_trans_opts)]
+
+    opts_json = json.dumps(formatted_opts, ensure_ascii=False)
+    c.execute(f"UPDATE questions SET {col_t}=?, {col_o}=? WHERE id=?", (trans_text, opts_json, q['id']))
+    conn.commit()
+    q[col_t] = trans_text
+    q[col_o] = opts_json
+    return True, None
+
+def render_lang_toggle_button(q, key_prefix, pref_mode="orig"):
+    """
+    渲染單題語言切換按鈕：清楚標示「免API快取秒切」或「點擊才AI翻譯」
+    """
+    qid = q['id']
+    _, _, actual_lang, target_flip, target_is_cached = get_question_lang_state(q, pref_mode)
+
+    if target_flip == "zh":
+        btn_label = "🔄 切回中文 (免API)" if target_is_cached else "🇹🇼 AI 翻成中文"
+    else:
+        btn_label = "🔄 切回英文 (免API)" if target_is_cached else "🇺🇸 AI 翻成英文"
+
+    if st.button(btn_label, key=f"{key_prefix}_{qid}", use_container_width=True):
+        if target_is_cached:
+            st.session_state.exam_lang_overrides[qid] = target_flip
+            st.rerun()
+        else:
+            api_key = get_api_key()
+            if not api_key:
+                st.error("請先至「⚙️ 設定」輸入 Gemini API Key！")
+            else:
+                with st.spinner("✨ AI 正在翻譯此題並寫入雲端快取（只耗 1 次額度，永久有效）..."):
+                    ok, err = translate_question_on_demand(q, target_flip, api_key)
+                    if ok:
+                        st.session_state.exam_lang_overrides[qid] = target_flip
+                        st.rerun()
+                    else:
+                        st.error(f"翻譯失敗：{err}")
 
 def extract_text_from_docx(file_bytes):
     try:
@@ -764,7 +841,7 @@ if 'exam_time_limit_sec' not in st.session_state: st.session_state.exam_time_lim
 if 'exam_total_time_str' not in st.session_state: st.session_state.exam_total_time_str = ""
 if 'exam_wrong_ids' not in st.session_state: st.session_state.exam_wrong_ids = []
 if 'exam_correct_ids' not in st.session_state: st.session_state.exam_correct_ids = []
-if 'exam_lang_mode' not in st.session_state: st.session_state.exam_lang_mode = "en"
+if 'exam_lang_mode' not in st.session_state: st.session_state.exam_lang_mode = "orig"
 if 'exam_lang_overrides' not in st.session_state: st.session_state.exam_lang_overrides = {}
 if 'practice_answered' not in st.session_state: st.session_state.practice_answered = False
 if 'pending_db_updates' not in st.session_state: st.session_state.pending_db_updates = {}
@@ -812,10 +889,15 @@ with tab_practice:
             all_available_pdfs, pdf_star_map = get_categories_by_folder(selected_folder)
             selected_pdfs = st.multiselect("📄 勾選要練習的考卷 / 講義：", options=all_available_pdfs, format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x, key="p_pdfs")
 
-            col_order, col_cnt, col_lang = st.columns([1.5, 1.2, 1.3])
+            col_order, col_cnt, col_lang = st.columns([1.3, 1.1, 1.6])
             with col_order: q_order = st.selectbox("🔀 出題順序：", ["照考卷順序", "隨機挑題"], key="p_ord")
             with col_cnt: q_count_option = st.selectbox("⏱️ 練習題數：", ["10 題", "20 題", "40 題", "全部題目"], index=1, key="p_cnt")
-            with col_lang: default_lang_choice = st.selectbox("🌐 預設語言：", ["🇺🇸 英文版", "🇹🇼 中文版"], key="p_lang")
+            with col_lang: 
+                default_lang_choice = st.selectbox(
+                    "🌐 預設顯示語言（0 API 消耗）：", 
+                    ["📄 原文顯示（最推薦）", "🇹🇼 優先顯示已快取中文", "🇺🇸 優先顯示已快取英文"], 
+                    key="p_lang"
+                )
 
             start_q_num = 1
             if q_order == "照考卷順序": start_q_num = st.number_input("📍 從第幾題開始做？", min_value=1, value=1, step=1, key="p_start")
@@ -851,7 +933,9 @@ with tab_practice:
                         st.session_state.exam_user_answers = {}
                         st.session_state.practice_answered = False
                         st.session_state.pending_db_updates = {}
-                        st.session_state.exam_lang_mode = "en" if default_lang_choice.startswith("🇺🇸") else "zh"
+                        if default_lang_choice.startswith("🇹🇼"): st.session_state.exam_lang_mode = "zh"
+                        elif default_lang_choice.startswith("🇺🇸"): st.session_state.exam_lang_mode = "en"
+                        else: st.session_state.exam_lang_mode = "orig"
                         st.session_state.exam_lang_overrides = {}
                         st.session_state.exam_active = True
                         st.session_state.exam_start_time = time.time()
@@ -868,8 +952,7 @@ with tab_practice:
         curr_q = st.session_state.exam_questions_cache[idx]
         curr_q_id = curr_q['id']
 
-        curr_lang = st.session_state.exam_lang_overrides.get(curr_q_id, st.session_state.exam_lang_mode)
-        disp_text, disp_options = get_question_bilingual(curr_q, curr_lang)
+        disp_text, disp_options, _, _, _ = get_question_lang_state(curr_q, st.session_state.exam_lang_mode)
 
         st.progress((idx + 1) / total_q)
         c_hdr1, c_hdr2 = st.columns([3, 1])
@@ -881,24 +964,14 @@ with tab_practice:
                 st.rerun()
 
         st.divider()
-        col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
+        col_t, col_lang_btn, col_s = st.columns([3.4, 1.6, 1])
         with col_t: 
             st.subheader(f"Q{idx + 1}. {disp_text}")
             if curr_q.get('has_q_img'):
                 q_img, _ = get_question_images_lazy(curr_q_id)
                 if q_img: st.image(q_img, use_container_width=True)
         with col_lang_btn:
-            target_flip = "zh" if curr_lang == "en" else "en"
-            btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
-            if st.button(btn_label, key=f"p_lang_{curr_q_id}", use_container_width=True):
-                col_check = "text_zh" if target_flip == "zh" else "text_en"
-                if not (curr_q.get(col_check) and str(curr_q[col_check]).strip()):
-                    api_key = get_api_key()
-                    if api_key:
-                        with st.spinner("AI 正在翻譯此題..."):
-                            translate_question_on_demand(curr_q, target_flip, api_key)
-                st.session_state.exam_lang_overrides[curr_q_id] = target_flip
-                st.rerun()
+            render_lang_toggle_button(curr_q, "p_lang", st.session_state.exam_lang_mode)
         with col_s:
             is_q_st = bool(curr_q.get('is_starred', 0))
             if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"p_star_{curr_q_id}", use_container_width=True):
@@ -1011,10 +1084,15 @@ with tab_test:
             all_available_pdfs, pdf_star_map = get_categories_by_folder(selected_folder)
             selected_pdfs = st.multiselect("📄 勾選要測驗的考卷：", options=all_available_pdfs, format_func=lambda x: f"⭐ {x}" if pdf_star_map.get(x) else x, key="t_pdfs")
 
-            col_order, col_cnt, col_lang = st.columns([1.5, 1.2, 1.3])
+            col_order, col_cnt, col_lang = st.columns([1.3, 1.1, 1.6])
             with col_order: q_order = st.selectbox("🔀 出題順序：", ["隨機抽題（全真模擬）", "照考卷順序"], key="t_ord")
             with col_cnt: q_count_option = st.selectbox("⏱️ 測驗題數：", ["10 題", "20 題", "40 題", "50 題", "全部題目"], index=2, key="t_cnt")
-            with col_lang: default_lang_choice = st.selectbox("🌐 預設語言：", ["🇺🇸 英文版", "🇹🇼 中文版"], key="t_lang")
+            with col_lang: 
+                default_lang_choice = st.selectbox(
+                    "🌐 預設顯示語言（0 API 消耗）：", 
+                    ["📄 原文顯示（最推薦）", "🇹🇼 優先顯示已快取中文", "🇺🇸 優先顯示已快取英文"], 
+                    key="t_lang"
+                )
 
             col_time_type, col_time_min = st.columns(2)
             with col_time_type: timer_type = st.selectbox("⏳ 計時方式：", ["倒數計時（限時考試）", "正數碼表"], key="t_time")
@@ -1050,7 +1128,9 @@ with tab_test:
                         st.session_state.exam_finished = False
                         st.session_state.exam_start_time = time.time()
                         st.session_state.exam_time_limit_sec = time_limit_min * 60
-                        st.session_state.exam_lang_mode = "en" if default_lang_choice.startswith("🇺🇸") else "zh"
+                        if default_lang_choice.startswith("🇹🇼"): st.session_state.exam_lang_mode = "zh"
+                        elif default_lang_choice.startswith("🇺🇸"): st.session_state.exam_lang_mode = "en"
+                        else: st.session_state.exam_lang_mode = "orig"
                         st.session_state.exam_lang_overrides = {}
                         st.rerun()
 
@@ -1065,8 +1145,7 @@ with tab_test:
         curr_q = st.session_state.exam_questions_cache[idx]
         curr_q_id = curr_q['id']
 
-        curr_lang = st.session_state.exam_lang_overrides.get(curr_q_id, st.session_state.exam_lang_mode)
-        disp_text, disp_options = get_question_bilingual(curr_q, curr_lang)
+        disp_text, disp_options, _, _, _ = get_question_lang_state(curr_q, st.session_state.exam_lang_mode)
 
         elapsed_sec = int(time.time() - st.session_state.exam_start_time)
         m, s = divmod(elapsed_sec, 60)
@@ -1110,24 +1189,14 @@ with tab_test:
                     st.rerun()
 
         st.divider()
-        col_t, col_lang_btn, col_s = st.columns([3.6, 1.4, 1])
+        col_t, col_lang_btn, col_s = st.columns([3.4, 1.6, 1])
         with col_t: 
             st.subheader(f"Q{idx + 1}. {disp_text}")
             if curr_q.get('has_q_img'):
                 q_img, _ = get_question_images_lazy(curr_q_id)
                 if q_img: st.image(q_img, use_container_width=True)
         with col_lang_btn:
-            target_flip = "zh" if curr_lang == "en" else "en"
-            btn_label = "🇹🇼 翻中文" if curr_lang == "en" else "🇺🇸 切英文"
-            if st.button(btn_label, key=f"t_lang_{curr_q_id}", use_container_width=True):
-                col_check = "text_zh" if target_flip == "zh" else "text_en"
-                if not (curr_q.get(col_check) and str(curr_q[col_check]).strip()):
-                    api_key = get_api_key()
-                    if api_key:
-                        with st.spinner("AI 正在翻譯此題..."):
-                            translate_question_on_demand(curr_q, target_flip, api_key)
-                st.session_state.exam_lang_overrides[curr_q_id] = target_flip
-                st.rerun()
+            render_lang_toggle_button(curr_q, "t_lang", st.session_state.exam_lang_mode)
         with col_s:
             is_q_st = bool(curr_q.get('is_starred', 0))
             if st.button("⭐ 已收藏" if is_q_st else "☆ 收藏", key=f"t_star_{curr_q_id}", use_container_width=True):
@@ -1195,12 +1264,16 @@ with tab_test:
             if rev_filter == "只看錯題與未作答" and is_right: continue
             if rev_filter == "只看答對題目" and not is_right: continue
 
-            rev_lang = st.session_state.exam_lang_overrides.get(qid, st.session_state.exam_lang_mode)
-            q_txt, q_opts = get_question_bilingual(q_data, rev_lang)
+            q_txt, q_opts, _, _, _ = get_question_lang_state(q_data, st.session_state.exam_lang_mode)
 
             status_icon = "🟢" if is_right else ("⚪ 未作答" if u_idx is None else "🔴")
             with st.expander(f"{status_icon} 第 {i} 題：{q_txt[:35]}..."):
-                st.markdown(f"**【完整題目】**：{q_txt}")
+                c_rt, c_rl = st.columns([3.5, 1.5])
+                with c_rt:
+                    st.markdown(f"**【完整題目】**：{q_txt}")
+                with c_rl:
+                    render_lang_toggle_button(q_data, "t_rev_lang", st.session_state.exam_lang_mode)
+
                 if q_data.get('has_q_img'):
                     q_img, _ = get_question_images_lazy(qid)
                     if q_img: st.image(q_img, use_container_width=True)
@@ -1224,7 +1297,7 @@ with tab_test:
             st.session_state.exam_questions_cache, st.session_state.exam_user_answers = [], {}
             st.rerun()
 
-# ---------- 【📖 分頁三：錯題總覽區 (分頁極速載入 + 按需編輯)】 ----------
+# ---------- 【📖 分頁三：錯題總覽區 (支援單題中英切換 + 分頁極速載入 + 按需編輯)】 ----------
 with tab_review:
     if st.session_state.exam_active or st.session_state.exam_finished:
         st.info("⚡ 系統運作中，背景查詢已自動暫停。")
@@ -1249,7 +1322,8 @@ with tab_review:
             query = """
                 SELECT id, folder, category, text, opt1, opt2, opt3, opt4, options, answer, explanation, wrong_count, is_starred,
                        (CASE WHEN question_image IS NOT NULL AND question_image != '' THEN 1 ELSE 0 END) as has_q_img,
-                       (CASE WHEN explanation_image IS NOT NULL AND explanation_image != '' THEN 1 ELSE 0 END) as has_exp_img
+                       (CASE WHEN explanation_image IS NOT NULL AND explanation_image != '' THEN 1 ELSE 0 END) as has_exp_img,
+                       text_en, options_en, text_zh, options_zh
                 FROM questions WHERE 1=1
             """
             params = []
@@ -1297,15 +1371,21 @@ with tab_review:
                 for idx, q in enumerate(page_questions, start=start_i + 1):
                     qid = q['id']
                     is_st = bool(q.get('is_starred', 0))
-                    q_opts = get_question_options(q)
-                    with st.expander(f"{'⭐ ' if is_st else ''}第 {idx} 題 (ID: {qid}): {q['text'][:35]}... (錯 {q['wrong_count']} 次)"):
-                        st.markdown(f"**【題目】** {q['text']}")
+                    disp_q_text, disp_q_opts, _, _, _ = get_question_lang_state(q, "orig")
+                    orig_q_opts = get_question_options(q)
+
+                    with st.expander(f"{'⭐ ' if is_st else ''}第 {idx} 題 (ID: {qid}): {disp_q_text[:35]}... (錯 {q['wrong_count']} 次)"):
+                        c_rv1, c_rv2 = st.columns([3.4, 1.6])
+                        with c_rv1:
+                            st.markdown(f"**【題目】** {disp_q_text}")
+                        with c_rv2:
+                            render_lang_toggle_button(q, "rev_lang", "orig")
                         
                         if q.get('has_q_img'):
                             q_img, _ = get_question_images_lazy(qid)
                             if q_img: st.image(q_img, use_container_width=True)
 
-                        for opt_i, opt_text in enumerate(q_opts):
+                        for opt_i, opt_text in enumerate(disp_q_opts):
                             st.markdown(f"- {format_clean_option(opt_text, opt_i)}")
                         st.markdown(f"✅ **正確答案**：`{q['answer']}`")
                         exp_text = q.get('explanation', '') if q.get('explanation') and q['explanation'].strip() and q['explanation'] != '無提供詳解' else "尚未填寫詳解"
@@ -1329,13 +1409,13 @@ with tab_review:
 
                         if open_edit:
                             st.markdown("---")
-                            rev_text_input = st.text_area("修改題目內容：", value=q['text'], key=f"rev_q_txt_{qid}", height=100)
+                            rev_text_input = st.text_area("修改題目原文：", value=q['text'], key=f"rev_q_txt_{qid}", height=100)
                             
                             rev_q_img_input = st.file_uploader("更換/新增【題目配圖】(病理/圖表/心電圖)", type=["png", "jpg", "jpeg"], key=f"rev_q_img_{qid}")
 
                             st.markdown("**修改各選項文字：**")
                             new_q_options = []
-                            for o_idx, o_txt in enumerate(q_opts):
+                            for o_idx, o_txt in enumerate(orig_q_opts):
                                 clean_o = strip_option_prefix(o_txt)
                                 letter = chr(65 + o_idx) if o_idx < 26 else str(o_idx + 1)
                                 val = st.text_input(f"選項 ({letter})", value=clean_o, key=f"rev_opt_{qid}_{o_idx}")
@@ -1364,11 +1444,12 @@ with tab_review:
                                     clean_opts_json = json.dumps(new_q_options, ensure_ascii=False)
                                     opt1_val = new_q_options[0] if len(new_q_options) > 0 else ""
                                     opt2_val = new_q_options[1] if len(new_q_options) > 1 else ""
-                                    opt3_val = new_q_options[2] if len(new_q_options) > 3 else ""
+                                    opt3_val = new_q_options[2] if len(new_q_options) > 2 else ""
                                     opt4_val = new_q_options[3] if len(new_q_options) > 3 else ""
+                                    # 當原文被修改時，清空舊翻譯快取以確保雙語同步
                                     c.execute("""
                                         UPDATE questions 
-                                        SET text=?, opt1=?, opt2=?, opt3=?, opt4=?, options=?, answer=?, explanation=?, explanation_image=?, question_image=? 
+                                        SET text=?, opt1=?, opt2=?, opt3=?, opt4=?, options=?, answer=?, explanation=?, explanation_image=?, question_image=?, text_en='', options_en='', text_zh='', options_zh='' 
                                         WHERE id=?
                                     """, (rev_text_input.strip(), opt1_val, opt2_val, opt3_val, opt4_val, clean_opts_json, rev_ans_input.strip().upper(), rev_exp_input.strip(), new_exp_img_b64, new_q_img_b64, qid))
                                     conn.commit()
